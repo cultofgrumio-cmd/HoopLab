@@ -28,6 +28,15 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        javaCompileOptions {
+            annotationProcessorOptions {
+                arguments += mapOf(
+                    "room.incremental" to "true",
+                    "room.expandProjection" to "true"
+                )
+            }
+        }
     }
 
     buildTypes {
@@ -37,8 +46,27 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    dexOptions {
+        javaMaxHeapSize = "4g"
+    }
 }
 
 flutter {
     source = "../.."
 }
+dependencies {
+    // ...existing code...
+    
+    implementation("org.tensorflow:tensorflow-lite:2.11.0") {
+        exclude(group = "com.google.ai.edge.litert", module = "litert")
+        exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+        exclude(group = "com.google.ai.edge.litert", module = "litert-gpu")
+    }
+    
+    // If you need GPU support
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.11.0") {
+        exclude(group = "com.google.ai.edge.litert", module = "litert-gpu")
+    }
+}
+

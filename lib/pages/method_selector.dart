@@ -11,6 +11,8 @@ class MethodSelector extends StatefulWidget {
 }
 
 class _MethodSelectorState extends State<MethodSelector> {
+  bool _isPickerActive = false;
+
   Widget methodButton(String text, VoidCallback onPressed, IconData icon) {
     return Container(
       padding: EdgeInsets.all(20),
@@ -29,27 +31,35 @@ class _MethodSelectorState extends State<MethodSelector> {
   @override
   Widget build(BuildContext context) {
     return SafeArea(
-      child: Scaffold(body:  Align(
+      child: Scaffold(body: Align(
         alignment: Alignment.center,
         child: Row(
-            spacing: 50,
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
+          spacing: 50,
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
             methodButton("Camera", () {
               Navigator.push(context, MaterialPageRoute(builder: (context) => CameraPage()));
             }, Icons.camera_alt),
             methodButton("Gallery", () async {
-              final ImagePicker picker = ImagePicker();
-              final XFile? video = await picker.pickVideo(source: ImageSource.gallery);
-              if (video != null) {
-                Navigator.push(context, MaterialPageRoute(builder: (context) => ViewerPage(videoPath: video.path)));
+              if (_isPickerActive) return;
+              
+              try {
+                setState(() => _isPickerActive = true);
+                final ImagePicker picker = ImagePicker();
+                final XFile? video = await picker.pickVideo(source: ImageSource.gallery);
+                if (video != null) {
+                  Navigator.push(context, MaterialPageRoute(
+                    builder: (context) => ViewerPage(videoPath: video.path)
+                  ));
+                }
+              } finally {
+                setState(() => _isPickerActive = false);
               }
-
             }, Icons.photo_library),
-          ],),
-      )
-      )
+          ],
+        ),
+      ))
     );
   }
 }

@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 import json
 
 app = fastapi.FastAPI()
-model = YOLO("best.pt")  # Load your trained basketball model
+model = YOLO("2.pt")  # Load your trained basketball model
 
 class BasketballTracker:
     def __init__(self, max_distance=100, max_frames_missing=10):

@@ -4,11 +4,14 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
 import 'package:hooplab/models/clip.dart';
+import 'package:hooplab/utils/image_utils.dart';
 import 'package:video_player/video_player.dart';
 
+
 import 'package:http/http.dart' as http;
-import 'package:ultralytics_yolo/yolo.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 class ViewerPage extends StatefulWidget {
@@ -23,13 +26,16 @@ class _ViewerPageState extends State<ViewerPage> {
   bool isAnalyzing = false;
   late Clip clip;
   late VideoPlayerController videoController;
-  late YOLO yolo;
+  OrtSession? session;
   Timer? frameTimer;
   StreamSubscription? analysisSubscription;
 
   int curFrame = 0;
   double videoDuration = 0.0;
   bool seeking = false;
+  
+  // ONNX Runtime instance
+  final ort = OnnxRuntime();
 
   // Stream<Map<String, dynamic>>? fetchData() {
   //   // var endpoint = Uri.parse('http://127.0.0.1:8000/analyze');
@@ -53,31 +59,137 @@ class _ViewerPageState extends State<ViewerPage> {
   //   });
   // }
 
-  Future<void> initializeYOLO() async {
-    yolo = YOLO(modelPath: 'assets/best.pt', task: YOLOTask.detect);
-    await yolo.loadModel();
+  Future<void> initializeONNX() async {
+    try {
+      // Load the ONNX model
+      session = await ort.createSessionFromAsset('assets/2.onnx');
+      print('ONNX model loaded successfully');
+    } catch (e) {
+      print('Error loading ONNX model: $e');
+      rethrow;
+    }
+  }
+
+  Future<List<dynamic>> runInference(Uint8List imageBytes) async {
+    if (session == null) throw Exception('ONNX session not initialized');
+
+    try {
+      // Reduce image size before processing
+      final thumbnail = await VideoThumbnail.thumbnailData(
+        video: widget.videoPath!,
+        imageFormat: ImageFormat.JPEG, // JPEG uses less memory than PNG
+        maxWidth: 640, // limit width
+        maxHeight: 640, // limit height
+        quality: 50, // reduce quality to save memory
+      );
+      
+      if (thumbnail == null) throw Exception('Failed to create thumbnail');
+
+      // Preprocess the image
+      final inputImage = await preprocessImage(thumbnail);
+      
+      // Create input tensor with reduced memory footprint
+      final input = await OrtValue.fromList(
+        inputImage,
+        [1, 3, 640, 640],
+      );
+
+      try {
+        // Run inference
+        final outputs = await session!.run({'images': input});
+        final outputTensor = outputs.values.first;
+        final shape = await outputTensor.shape;
+        final outputData = await outputTensor.asList();
+        
+        // Clean up
+        await input.dispose();
+        
+        return outputData;
+      } finally {
+        // Ensure tensor is released even if inference fails
+        await input.dispose();
+      }
+    } catch (e) {
+      print('Inference error: $e');
+      rethrow;
+    }
+  }
+
+  void analyzeFrame(Uint8List frameBytes) async {
+    try {
+      // Preprocess image to match model input requirements
+      final inputTensor = await preprocessImage(frameBytes);
+      
+      // Create input tensor for ONNX Runtime
+      final input = await OrtValue.fromList(
+        inputTensor, 
+        [1, 3, 640, 640] // NCHW format
+      );
+      
+      // Run inference
+      final inputs = {'images': input}; // Check your model's input name
+      final outputs = await session!.run(inputs);
+      
+      // Get output - YOLO models typically output [1, n_boxes, n_values]
+      final output = outputs.values.first;
+      final outputData = await output.asList();
+
+      print(outputData);
+      
+      if (outputData.isEmpty) {
+        print('No detections found');
+        return;
+      }
+
+      // Process detections
+      // TODO: Parse according to your YOLO model's output format
+      // Typically: [x, y, w, h, confidence, class1_conf, class2_conf, ...]
+      
+      setState(() {
+        // Update UI with detections
+        // ...
+      });
+
+    } catch (e) {
+      print('Analysis error: $e');
+    }
   }
 
   Stream<Map<String, dynamic>> inference() async* {
-    int videoLength = videoController.value.duration.inMilliseconds
-        .toDouble()
-        .round();
-    int parts = (videoLength / 5).floor();
-    List<int> partList = List.generate(parts, (i) => i * 5);
+    // Reduce the number of frames processed
+    final interval = const Duration(milliseconds: 500); // Process 2 frames per second
+    int videoLength = videoController.value.duration.inMilliseconds;
+    int currentPosition = 0;
 
-    for (var timeMs in partList) {
-      final byteList = await VideoThumbnail.thumbnailData(
-        timeMs: timeMs,
-        video: widget.videoPath!,
-        imageFormat: ImageFormat.PNG,
-        maxHeight: videoController.value.size.height
-            .toInt(), // specify the height of the thumbnail, let the width auto-scaled to keep the source aspect ratio
-        quality: 75,
-      );
+    while (currentPosition < videoLength) {
+      try {
+        final byteList = await VideoThumbnail.thumbnailData(
+          timeMs: currentPosition,
+          video: widget.videoPath!,
+          imageFormat: ImageFormat.JPEG,
+          maxHeight: 640, // Limit height
+          quality: 50,
+        );
 
-      if (byteList != null) {
-        final prediction = await yolo.predict(byteList);
-        yield prediction;
+        if (byteList != null) {
+          final rawPredictions = await runInference(byteList);
+          final detections = await processYoloOutput(rawPredictions);
+          
+          yield {
+            'timestamp': currentPosition,
+            'detections': detections,
+          };
+        }
+
+        // Increment by interval
+        currentPosition += interval.inMilliseconds;
+        
+        // Add a small delay to prevent memory buildup
+        await Future.delayed(const Duration(milliseconds: 100));
+      } catch (e) {
+        print('Error processing frame at ${currentPosition}ms: $e');
+        currentPosition += interval.inMilliseconds;
+        continue;
       }
     }
   }
@@ -92,7 +204,7 @@ class _ViewerPageState extends State<ViewerPage> {
   @override
   void initState() {
     initializeVideoPlayer();
-    initializeYOLO();
+    initializeONNX();
     clip = Clip(
       id: "1",
       name: "Test Clip",
@@ -339,4 +451,102 @@ class _ViewerPageState extends State<ViewerPage> {
       ),
     );
   }
+}
+
+class Detection {
+  final double x, y, w, h;
+  final double confidence;
+  
+  Detection({
+    required this.x, 
+    required this.y, 
+    required this.w, 
+    required this.h, 
+    required this.confidence
+  });
+}
+
+Future<List<Detection>> processYoloOutput(List<dynamic> outputData) async {
+  List<Detection> detections = [];
+  
+  if (outputData.isEmpty) return [];
+  
+  // YOLOv8 output shape is [1, 5, 8400]
+  var predictions = outputData[0] as List<dynamic>;
+  int numBoxes = 8400;
+  
+  print('Processing ${predictions.length} predictions');
+  
+  // Create lists for each component
+  List<double> boxes_x = List<double>.from(predictions[0]);
+  List<double> boxes_y = List<double>.from(predictions[1]);
+  List<double> boxes_w = List<double>.from(predictions[2]);
+  List<double> boxes_h = List<double>.from(predictions[3]);
+  List<double> confidences = List<double>.from(predictions[4]);
+  
+  for (int i = 0; i < numBoxes; i++) {
+    double confidence = confidences[i];
+    
+    // Filter low confidence detections
+    if (confidence > 0.25) { // Lowered threshold for testing
+      detections.add(Detection(
+        x: boxes_x[i],
+        y: boxes_y[i],
+        w: boxes_w[i],
+        h: boxes_h[i],
+        confidence: confidence
+      ));
+      
+      print('Found detection: x=${boxes_x[i]}, y=${boxes_y[i]}, conf=$confidence');
+    }
+  }
+  
+  return detections;
+}
+
+// Add this class to draw the detections
+class DetectionPainter extends CustomPainter {
+  final List<Detection> detections;
+  final Size videoSize;
+  
+  DetectionPainter({required this.detections, required this.videoSize});
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.red
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0;
+      
+    for (var detection in detections) {
+      // Convert YOLO coordinates to screen coordinates
+      double x = detection.x * size.width / 640; // 640 is model input size
+      double y = detection.y * size.height / 640;
+      double w = detection.w * size.width / 640;
+      double h = detection.h * size.height / 640;
+      
+      canvas.drawRect(
+        Rect.fromLTWH(x - w/2, y - h/2, w, h),
+        paint
+      );
+      
+      // Draw confidence text
+      TextPainter(
+        text: TextSpan(
+          text: '${(detection.confidence * 100).toStringAsFixed(0)}%',
+          style: TextStyle(
+            color: Colors.red,
+            fontSize: 16,
+            backgroundColor: Colors.white,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )
+        ..layout()
+        ..paint(canvas, Offset(x - w/2, y - h/2 - 20));
+    }
+  }
+  
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
