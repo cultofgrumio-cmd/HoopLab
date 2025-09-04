@@ -193,14 +193,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.3.4+2"
-  cross_platform_video_thumbnails:
-    dependency: transitive
-    description:
-      name: cross_platform_video_thumbnails
-      sha256: "8a83d9a188c5101b4ce14369b114cb2523fa66ed1774d0c1bc8d31212fe43194"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.0.2"
   crypto:
     dependency: transitive
     description:
@@ -781,14 +773,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.1.36"
-  universal_io:
-    dependency: transitive
-    description:
-      name: universal_io
-      sha256: "1722b2dcc462b4b2f3ee7d188dad008b6eb4c40bbd03a3de451d82c78bba9aad"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.2.2"
   vector_math:
     dependency: transitive
     description:
@@ -837,14 +821,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.4.0"
-  video_snapshot_generator:
+  video_thumbnail:
     dependency: "direct main"
     description:
-      name: video_snapshot_generator
-      sha256: "88b62218c9182d84eac7d420f3f310166e6d1b8b29a43a852f6ae7b757cf0b3f"
+      name: video_thumbnail
+      sha256: "181a0c205b353918954a881f53a3441476b9e301641688a581e0c13f00dc588b"
       url: "https://pub.dev"
     source: hosted
-    version: "0.0.2"
+    version: "0.5.6"
   vm_service:
     dependency: transitive
     description:
