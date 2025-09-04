@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:camerawesome/camerawesome_plugin.dart';
-import 'package:hooplab/pages/viewer.dart';
+import 'package:hooplab/pages/viewer_painter_CONCEPT.dart';
 
 class CameraPage extends StatefulWidget {
   const CameraPage({super.key});

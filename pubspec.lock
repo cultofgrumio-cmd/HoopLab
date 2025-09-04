@@ -193,6 +193,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.3.4+2"
+  cross_platform_video_thumbnails:
+    dependency: transitive
+    description:
+      name: cross_platform_video_thumbnails
+      sha256: "8a83d9a188c5101b4ce14369b114cb2523fa66ed1774d0c1bc8d31212fe43194"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.0.2"
   crypto:
     dependency: transitive
     description:
@@ -765,6 +773,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  ultralytics_yolo:
+    dependency: "direct main"
+    description:
+      name: ultralytics_yolo
+      sha256: "434ed91994f6ddbb6d787a452e5c7a3ca5270d647a7ca66ddba7275a0f08cd02"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.36"
+  universal_io:
+    dependency: transitive
+    description:
+      name: universal_io
+      sha256: "1722b2dcc462b4b2f3ee7d188dad008b6eb4c40bbd03a3de451d82c78bba9aad"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.2.2"
   vector_math:
     dependency: transitive
     description:
@@ -813,6 +837,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.4.0"
+  video_snapshot_generator:
+    dependency: "direct main"
+    description:
+      name: video_snapshot_generator
+      sha256: "88b62218c9182d84eac7d420f3f310166e6d1b8b29a43a852f6ae7b757cf0b3f"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.0.2"
   vm_service:
     dependency: transitive
     description:
@@ -879,4 +911,4 @@ packages:
     version: "3.1.3"
 sdks:
   dart: ">=3.9.0 <4.0.0"
-  flutter: ">=3.29.0"
+  flutter: ">=3.32.1"

@@ -40,6 +40,8 @@ dependencies:
   video_player: ^2.10.0
   image_picker: ^1.2.0
   http: ^1.5.0
+  video_snapshot_generator: ^0.0.2
+  ultralytics_yolo: ^0.1.36
 
 dev_dependencies:
   flutter_test:
