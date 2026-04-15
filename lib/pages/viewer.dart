@@ -46,6 +46,7 @@ class _ViewerPageState extends State<ViewerPage> {
   int curFrame = 0;
   int currentShotIndex = 0; // Track which shot we're viewing
   bool _isCancelled = false; // Track if extraction is cancelled
+  Directory? _framesDir; // Temp dir for extracted frames, cleaned up after analysis
 
   // Detection mode settings
   bool useCourtMode =
@@ -164,7 +165,9 @@ class _ViewerPageState extends State<ViewerPage> {
       }
 
       // Create temporary directory for frames
-      final framesDir = Directory.systemTemp.createTempSync('hooplab_frames');
+      _framesDir?.deleteSync(recursive: true); // Clean up any previous run
+      _framesDir = Directory.systemTemp.createTempSync('hooplab_frames');
+      final framesDir = _framesDir!;
 
       // Extract frames using FFmpeg (MUCH faster!)
       debugPrint('🚀 Extracting frames with FFmpeg at ${targetFPS}fps...');
@@ -355,6 +358,13 @@ class _ViewerPageState extends State<ViewerPage> {
       return;
     }
 
+    // Compute average hoop bbox so region thresholds scale with actual video
+    final hoopBBox = _getAverageHoopBBox(0, clip.frames.length - 1, null);
+    debugPrint(
+      '📐 Hoop bbox for region detection: ${hoopBBox?.width.toStringAsFixed(1) ?? "default"}w '
+      'x ${hoopBBox?.height.toStringAsFixed(1) ?? "default"}h',
+    );
+
     for (int i = 0; i < clip.frames.length; i++) {
       final frame = clip.frames[i];
       final ballDetections = frame.detections
@@ -369,7 +379,8 @@ class _ViewerPageState extends State<ViewerPage> {
         currentShotBallPositions.add(ballPos);
 
         // Check if ball enters "UP" region (around backboard, above hoop)
-        if (!inUpRegion && _isInUpRegion(ballPos, hoopPosition, ball.bbox)) {
+        if (!inUpRegion &&
+            _isInUpRegion(ballPos, hoopPosition, ball.bbox, hoopBox: hoopBBox)) {
           inUpRegion = true;
           upFrameIndex = i;
           currentShotFrames = [frame];
@@ -384,7 +395,7 @@ class _ViewerPageState extends State<ViewerPage> {
         // Check if ball enters "DOWN" region (below the net)
         if (inUpRegion &&
             !inDownRegion &&
-            _isInDownRegion(ballPos, hoopPosition, ball.bbox)) {
+            _isInDownRegion(ballPos, hoopPosition, ball.bbox, hoopBox: hoopBBox)) {
           inDownRegion = true;
           downFrameIndex = i;
           debugPrint(
@@ -591,7 +602,7 @@ class _ViewerPageState extends State<ViewerPage> {
                 shot.prediction = "MISS • ${qualityResult.feedback}";
               }
 
-              print("SHOT ACCURACY: ${shot.accuracy}");
+              debugPrint('🏀 SHOT ACCURACY: ${shot.accuracy}');
 
               shots.add(shot);
               debugPrint(
@@ -627,15 +638,34 @@ class _ViewerPageState extends State<ViewerPage> {
       );
 
       if (currentShotBallPositions.length >= 5) {
-        // Evaluate shot quality (technique/form)
+        final hoopBBox = _getAverageHoopBBox(
+          shootingStartFrame,
+          clip.frames.length - 1,
+          null,
+        );
+        final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
+
+        final rimCrossingResult =
+            TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
+              ballPoints: currentShotBallPositions,
+              hoopPosition: hoopPosition ?? Offset.zero,
+              hoopBBox: hoopBBox,
+              hoopRadius: hoopRadius,
+              frames: currentShotFrames,
+            );
+
         final qualityResult = ShotQualityEvaluator.evaluateShotQuality(
           ballTrajectory: currentShotBallPositions,
           hoopPosition: hoopPosition ?? Offset.zero,
-          hoopRadius: 30.0,
+          hoopRadius: hoopRadius,
         );
 
-        shot.accuracy = qualityResult.overallScore;
-        shot.prediction = qualityResult.feedback;
+        shot.accuracy = rimCrossingResult.accuracy;
+        if (rimCrossingResult.accuracy > 50.0) {
+          shot.prediction = "MAKE • ${qualityResult.feedback}";
+        } else {
+          shot.prediction = "MISS • ${qualityResult.feedback}";
+        }
       }
 
       shots.add(shot);
@@ -652,13 +682,17 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   /// Check if ball is in the "UP" region (around backboard, above hoop)
-  bool _isInUpRegion(Offset ballPos, Offset hoopPos, BoundingBox ballBox) {
+  bool _isInUpRegion(
+    Offset ballPos,
+    Offset hoopPos,
+    BoundingBox ballBox, {
+    BoundingBox? hoopBox,
+  }) {
     // Define UP region boundaries based on reference implementation
     // X: 4x hoop width on each side
     // Y: 2x hoop height above, to 0.5x below hoop center
-
-    final hoopWidth = 60.0; // Approximate hoop width in pixels
-    final hoopHeight = 30.0; // Approximate hoop height in pixels
+    final hoopWidth = hoopBox?.width ?? 60.0;
+    final hoopHeight = hoopBox?.height ?? 30.0;
 
     final x1 = hoopPos.dx - (4 * hoopWidth);
     final x2 = hoopPos.dx + (4 * hoopWidth);
@@ -672,9 +706,14 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   /// Check if ball is in the "DOWN" region (below the net)
-  bool _isInDownRegion(Offset ballPos, Offset hoopPos, BoundingBox ballBox) {
+  bool _isInDownRegion(
+    Offset ballPos,
+    Offset hoopPos,
+    BoundingBox ballBox, {
+    BoundingBox? hoopBox,
+  }) {
     // Define DOWN region: below the bottom of the hoop
-    final hoopHeight = 30.0;
+    final hoopHeight = hoopBox?.height ?? 30.0;
     final downThreshold = hoopPos.dy + (0.5 * hoopHeight);
 
     return ballPos.dy > downThreshold;
@@ -991,6 +1030,9 @@ class _ViewerPageState extends State<ViewerPage> {
     analysisSubscription?.cancel();
     _frameCache.clear();
     poseDetector?.dispose();
+    try {
+      _framesDir?.deleteSync(recursive: true);
+    } catch (_) {}
     super.dispose();
   }
 
@@ -1028,9 +1070,6 @@ class _ViewerPageState extends State<ViewerPage> {
 
     // Video metadata handled by CleanVideoPlayer
 
-    // Calculate frame interval based on desired analysis frequency
-    final analyzeEveryNthFrame = (30.0 * 0.1)
-        .round(); // Analyze every 0.5 seconds
     for (int idx = 0; idx < frameResponse!['extracted_frames']; idx += 1) {
       // Check if cancelled during analysis
       if (_isCancelled) {
@@ -1049,7 +1088,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
         // Use the direct path from frame info
         final framePath = frameInfo['path'] as String;
-        final frameBytes = File(framePath).readAsBytesSync();
+        final frameBytes = await File(framePath).readAsBytes();
 
         // Set total frames on first iteration and reset progress counter
         if (idx == 0) {
@@ -1166,6 +1205,14 @@ class _ViewerPageState extends State<ViewerPage> {
     debugPrint(
       '  Average detections per frame: ${totalDetections / framesProcessed.clamp(1, double.infinity)}',
     );
+
+    // Clean up temp frames directory
+    try {
+      _framesDir?.deleteSync(recursive: true);
+      _framesDir = null;
+    } catch (e) {
+      debugPrint('⚠️ Failed to clean up temp frames: $e');
+    }
   }
 
   Widget _buildVideoPlayerWithOverlay() {
@@ -1388,9 +1435,8 @@ class _ViewerPageState extends State<ViewerPage> {
                                   setState(() {
                                     clip.frames.add(frameData);
                                     _frameCache.buildCache(clip.frames);
-                                    // framesProcessed already incremented in analyzeVideoFrames()
-                                    totalDetections +=
-                                        frameData.detections.length;
+                                    // totalDetections and framesProcessed already
+                                    // incremented in analyzeVideoFrames()
                                     if (frameData.isShootingMotion) {
                                       shootingFramesDetected++;
                                     }
@@ -1479,6 +1525,7 @@ class _ViewerPageState extends State<ViewerPage> {
                                 ),
                                 TextButton(
                                   onPressed: () {
+                                    _isCancelled = true;
                                     analysisSubscription?.cancel();
                                     setState(() {
                                       isAnalyzing = false;
