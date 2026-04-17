@@ -86,18 +86,41 @@ class _MethodSelectorState extends State<MethodSelector>
         );
 
         if (trimResult != null && mounted) {
-          // Generate trimmed video
-          final trimmedPath = await _generateTrimmedVideo(
-            videoPath,
-            trimResult,
-          );
+          String? finalPath;
 
-          if (trimmedPath != null && mounted) {
-            // Navigate to viewer with trimmed video
+          if (trimResult.duration.inSeconds <= 15) {
+            // Short clip: render intermediate then open a second trimmer zoomed in
+            final intermediatePath = await _generateTrimmedVideo(
+              videoPath,
+              trimResult,
+              dialogText: 'Preparing fine trim...',
+            );
+
+            if (intermediatePath != null && mounted) {
+              final TrimDurationSpan? refinedResult = await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) =>
+                      VideoTrimmer(originalVideoPath: intermediatePath),
+                ),
+              );
+
+              if (refinedResult != null && mounted) {
+                finalPath = await _generateTrimmedVideo(
+                  intermediatePath,
+                  refinedResult,
+                );
+              }
+            }
+          } else {
+            finalPath = await _generateTrimmedVideo(videoPath, trimResult);
+          }
+
+          if (finalPath != null && mounted) {
             await Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (context) => viewer.ViewerPage(videoPath: trimmedPath),
+                builder: (context) => viewer.ViewerPage(videoPath: finalPath),
               ),
             );
           }
@@ -117,21 +140,21 @@ class _MethodSelectorState extends State<MethodSelector>
 
   Future<String?> _generateTrimmedVideo(
     String videoPath,
-    TrimDurationSpan trimSpan,
-  ) async {
+    TrimDurationSpan trimSpan, {
+    String dialogText = 'Trimming video...',
+  }) async {
     try {
       if (!mounted) return null;
 
-      // Show loading dialog
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (context) => const AlertDialog(
+        builder: (context) => AlertDialog(
           content: Row(
             children: [
-              CircularProgressIndicator(),
-              SizedBox(width: 16),
-              Text('Trimming video...'),
+              const CircularProgressIndicator(),
+              const SizedBox(width: 16),
+              Text(dialogText),
             ],
           ),
         ),
