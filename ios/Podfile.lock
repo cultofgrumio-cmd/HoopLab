@@ -1,24 +1,90 @@
 PODS:
-  - camerawesome (0.0.1):
+  - camera_avfoundation (0.0.1):
+    - Flutter
+  - ffmpeg_kit_flutter_new (1.0.0):
+    - ffmpeg_kit_flutter_new/full-gpl (= 1.0.0)
+    - Flutter
+  - ffmpeg_kit_flutter_new/full-gpl (1.0.0):
     - Flutter
   - Flutter (1.0.0)
-  - flutter_video_info (1.1.0):
+  - google_mlkit_commons (0.9.0):
     - Flutter
+    - MLKitVision
+  - google_mlkit_pose_detection (0.13.0):
+    - Flutter
+    - google_mlkit_commons
+    - GoogleMLKit/PoseDetection (~> 7.0.0)
+    - GoogleMLKit/PoseDetectionAccurate (~> 7.0.0)
+  - GoogleDataTransport (10.1.0):
+    - nanopb (~> 3.30910.0)
+    - PromisesObjC (~> 2.4)
+  - GoogleMLKit/MLKitCore (7.0.0):
+    - MLKitCommon (~> 12.0.0)
+  - GoogleMLKit/PoseDetection (7.0.0):
+    - GoogleMLKit/MLKitCore
+    - MLKitPoseDetection (~> 1.0.0-beta14)
+  - GoogleMLKit/PoseDetectionAccurate (7.0.0):
+    - GoogleMLKit/MLKitCore
+    - MLKitPoseDetectionAccurate (~> 1.0.0-beta14)
+  - GoogleToolboxForMac/Defines (4.2.1)
+  - GoogleToolboxForMac/Logger (4.2.1):
+    - GoogleToolboxForMac/Defines (= 4.2.1)
+  - "GoogleToolboxForMac/NSData+zlib (4.2.1)":
+    - GoogleToolboxForMac/Defines (= 4.2.1)
+  - GoogleUtilities/Environment (8.1.0):
+    - GoogleUtilities/Privacy
+  - GoogleUtilities/Logger (8.1.0):
+    - GoogleUtilities/Environment
+    - GoogleUtilities/Privacy
+  - GoogleUtilities/Privacy (8.1.0)
+  - GoogleUtilities/UserDefaults (8.1.0):
+    - GoogleUtilities/Logger
+    - GoogleUtilities/Privacy
+  - GTMSessionFetcher/Core (3.5.0)
   - image_picker_ios (0.0.1):
     - Flutter
-  - libwebp (1.5.0):
-    - libwebp/demux (= 1.5.0)
-    - libwebp/mux (= 1.5.0)
-    - libwebp/sharpyuv (= 1.5.0)
-    - libwebp/webp (= 1.5.0)
-  - libwebp/demux (1.5.0):
-    - libwebp/webp
-  - libwebp/mux (1.5.0):
-    - libwebp/demux
-  - libwebp/sharpyuv (1.5.0)
-  - libwebp/webp (1.5.0):
-    - libwebp/sharpyuv
+  - MLImage (1.0.0-beta6)
+  - MLKitCommon (12.0.0):
+    - GoogleDataTransport (~> 10.0)
+    - GoogleToolboxForMac/Logger (< 5.0, >= 4.2.1)
+    - "GoogleToolboxForMac/NSData+zlib (< 5.0, >= 4.2.1)"
+    - GoogleUtilities/Logger (~> 8.0)
+    - GoogleUtilities/UserDefaults (~> 8.0)
+    - GTMSessionFetcher/Core (< 4.0, >= 3.3.2)
+  - MLKitPoseDetection (1.0.0-beta14):
+    - MLKitCommon (~> 12.0)
+    - MLKitPoseDetectionCommon (= 1.0.0-beta14)
+    - MLKitXenoCommon (= 1.0.0-beta14)
+  - MLKitPoseDetectionAccurate (1.0.0-beta14):
+    - MLKitCommon (~> 12.0)
+    - MLKitPoseDetectionCommon (= 1.0.0-beta14)
+    - MLKitXenoCommon (= 1.0.0-beta14)
+  - MLKitPoseDetectionCommon (1.0.0-beta14):
+    - MLKitCommon (~> 12.0)
+    - MLKitXenoCommon (= 1.0.0-beta14)
+  - MLKitVision (8.0.0):
+    - GoogleToolboxForMac/Logger (< 5.0, >= 4.2.1)
+    - "GoogleToolboxForMac/NSData+zlib (< 5.0, >= 4.2.1)"
+    - GTMSessionFetcher/Core (< 4.0, >= 3.3.2)
+    - MLImage (= 1.0.0-beta6)
+    - MLKitCommon (~> 12.0)
+  - MLKitXenoCommon (1.0.0-beta14):
+    - MLKitCommon (~> 12.0)
+    - MLKitVision (~> 8.0)
+  - nanopb (3.30910.0):
+    - nanopb/decode (= 3.30910.0)
+    - nanopb/encode (= 3.30910.0)
+  - nanopb/decode (3.30910.0)
+  - nanopb/encode (3.30910.0)
+  - package_info_plus (0.4.5):
+    - Flutter
   - path_provider_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - pro_video_editor (0.0.1):
+    - Flutter
+  - PromisesObjC (2.4.0)
+  - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
   - ultralytics_yolo (0.0.4):
@@ -26,53 +92,98 @@ PODS:
   - video_player_avfoundation (0.0.1):
     - Flutter
     - FlutterMacOS
-  - video_thumbnail (0.0.1):
+  - wakelock_plus (0.0.1):
     - Flutter
-    - libwebp
 
 DEPENDENCIES:
-  - camerawesome (from `.symlinks/plugins/camerawesome/ios`)
+  - camera_avfoundation (from `.symlinks/plugins/camera_avfoundation/ios`)
+  - ffmpeg_kit_flutter_new (from `.symlinks/plugins/ffmpeg_kit_flutter_new/ios`)
   - Flutter (from `Flutter`)
-  - flutter_video_info (from `.symlinks/plugins/flutter_video_info/ios`)
+  - google_mlkit_commons (from `.symlinks/plugins/google_mlkit_commons/ios`)
+  - google_mlkit_pose_detection (from `.symlinks/plugins/google_mlkit_pose_detection/ios`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
+  - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
   - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
+  - pro_video_editor (from `.symlinks/plugins/pro_video_editor/ios`)
+  - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
   - ultralytics_yolo (from `.symlinks/plugins/ultralytics_yolo/ios`)
   - video_player_avfoundation (from `.symlinks/plugins/video_player_avfoundation/darwin`)
-  - video_thumbnail (from `.symlinks/plugins/video_thumbnail/ios`)
+  - wakelock_plus (from `.symlinks/plugins/wakelock_plus/ios`)
 
 SPEC REPOS:
   trunk:
-    - libwebp
+    - GoogleDataTransport
+    - GoogleMLKit
+    - GoogleToolboxForMac
+    - GoogleUtilities
+    - GTMSessionFetcher
+    - MLImage
+    - MLKitCommon
+    - MLKitPoseDetection
+    - MLKitPoseDetectionAccurate
+    - MLKitPoseDetectionCommon
+    - MLKitVision
+    - MLKitXenoCommon
+    - nanopb
+    - PromisesObjC
 
 EXTERNAL SOURCES:
-  camerawesome:
-    :path: ".symlinks/plugins/camerawesome/ios"
+  camera_avfoundation:
+    :path: ".symlinks/plugins/camera_avfoundation/ios"
+  ffmpeg_kit_flutter_new:
+    :path: ".symlinks/plugins/ffmpeg_kit_flutter_new/ios"
   Flutter:
     :path: Flutter
-  flutter_video_info:
-    :path: ".symlinks/plugins/flutter_video_info/ios"
+  google_mlkit_commons:
+    :path: ".symlinks/plugins/google_mlkit_commons/ios"
+  google_mlkit_pose_detection:
+    :path: ".symlinks/plugins/google_mlkit_pose_detection/ios"
   image_picker_ios:
     :path: ".symlinks/plugins/image_picker_ios/ios"
+  package_info_plus:
+    :path: ".symlinks/plugins/package_info_plus/ios"
   path_provider_foundation:
     :path: ".symlinks/plugins/path_provider_foundation/darwin"
+  pro_video_editor:
+    :path: ".symlinks/plugins/pro_video_editor/ios"
+  shared_preferences_foundation:
+    :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
   ultralytics_yolo:
     :path: ".symlinks/plugins/ultralytics_yolo/ios"
   video_player_avfoundation:
     :path: ".symlinks/plugins/video_player_avfoundation/darwin"
-  video_thumbnail:
-    :path: ".symlinks/plugins/video_thumbnail/ios"
+  wakelock_plus:
+    :path: ".symlinks/plugins/wakelock_plus/ios"
 
 SPEC CHECKSUMS:
-  camerawesome: 7ad7493b41b648d2fab64b1fd5ae08299b913120
+  camera_avfoundation: 281867ff09f1da66f031a184ecfbc6f2e625c9f5
+  ffmpeg_kit_flutter_new: 57e1119b327bb2e13a091e0d73576739fb9f22f5
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  flutter_video_info: a932e1b0da369bba95c3a14b7f61d5f8b0d03280
-  image_picker_ios: c560581cceedb403a6ff17f2f816d7fea1421fc1
-  libwebp: 02b23773aedb6ff1fd38cec7a77b81414c6842a8
-  path_provider_foundation: 2b6b4c569c0fb62ec74538f866245ac84301af46
+  google_mlkit_commons: 384e4e206e122b6dad430d3158205e0b2fac6789
+  google_mlkit_pose_detection: 3e38d756c918444cc462692f4c745546313dea54
+  GoogleDataTransport: aae35b7ea0c09004c3797d53c8c41f66f219d6a7
+  GoogleMLKit: eff9e23ec1d90ea4157a1ee2e32a4f610c5b3318
+  GoogleToolboxForMac: d1a2cbf009c453f4d6ded37c105e2f67a32206d8
+  GoogleUtilities: 00c88b9a86066ef77f0da2fab05f65d7768ed8e1
+  GTMSessionFetcher: 5aea5ba6bd522a239e236100971f10cb71b96ab6
+  image_picker_ios: 4f2f91b01abdb52842a8e277617df877e40f905b
+  MLImage: 0ad1c5f50edd027672d8b26b0fee78a8b4a0fc56
+  MLKitCommon: 07c2c33ae5640e5380beaaa6e4b9c249a205542d
+  MLKitPoseDetection: 9570bd90f18cd38c1599314785d1f70401569d94
+  MLKitPoseDetectionAccurate: 2c40d53a7b8cbb67b0ca1892b221f24ef4bac1ce
+  MLKitPoseDetectionCommon: b1fc630b8af919dd04bf3dd6c24cec239c0f95fd
+  MLKitVision: 45e79d68845a2de77e2dd4d7f07947f0ed157b0e
+  MLKitXenoCommon: ce5047943af6b4be7ae035dd81b3a56fdb29aab3
+  nanopb: fad817b59e0457d11a5dfbde799381cd727c1275
+  package_info_plus: c0502532a26c7662a62a356cebe2692ec5fe4ec4
+  path_provider_foundation: 0b743cbb62d8e47eab856f09262bb8c1ddcfe6ba
+  pro_video_editor: a2db926b93feb56ceeaad07ce08a4f64252d658e
+  PromisesObjC: f5707f49cb48b9636751c5b2e7d227e43fba9f47
+  shared_preferences_foundation: 5086985c1d43c5ba4d5e69a4e8083a389e2909e6
   ultralytics_yolo: c550236eb35c549df15ce6dfca979414d7b70248
-  video_player_avfoundation: 7c6c11d8470e1675df7397027218274b6d2360b3
-  video_thumbnail: c4e2a3c539e247d4de13cd545344fd2d26ffafd1
+  video_player_avfoundation: 7993f492ae0bd77edaea24d9dc051d8bb2cd7c86
+  wakelock_plus: 76957ab028e12bfa4e66813c99e46637f367fc7e
 
-PODFILE CHECKSUM: bc0d1ef0e548023a9bf0e5e87646b79147b61586
+PODFILE CHECKSUM: 3c63482e143d1b91d2d2560aee9fb04ecc74ac7e
 
 COCOAPODS: 1.16.2
