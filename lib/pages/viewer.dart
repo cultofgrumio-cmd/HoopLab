@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hooplab/models/clip.dart';
-import 'package:hooplab/utils/frame_cache.dart';
 import 'package:hooplab/utils/shot_quality_evaluator.dart';
 import 'package:hooplab/widgets/clean_video_player.dart';
 import 'package:hooplab/widgets/trajectory_overlay.dart';
@@ -55,9 +54,6 @@ class _ViewerPageState extends State<ViewerPage> {
 
   // Video handled by CleanVideoPlayer
 
-  // Performance optimization
-  final FrameIndexCache _frameCache = FrameIndexCache();
-
   // Clean display - just show ball trajectory
   @override
   void initState() {
@@ -71,11 +67,6 @@ class _ViewerPageState extends State<ViewerPage> {
 
   // Video position tracking handled by CleanVideoPlayer callback
 
-  void _rebuildFrameCache() {
-    if (clip.frames.isNotEmpty) {
-      _frameCache.buildCache(clip.frames);
-    }
-  }
 
   Future<Map<String, dynamic>?> extractVideoFrames() async {
     try {
@@ -1254,7 +1245,6 @@ class _ViewerPageState extends State<ViewerPage> {
     _isCancelled = true; // Cancel any ongoing frame extraction
     _sliderSeekDebouncer?.cancel();
     analysisSubscription?.cancel();
-    _frameCache.clear();
     poseDetector?.dispose();
     try {
       _framesDir?.deleteSync(recursive: true);
@@ -1660,7 +1650,6 @@ class _ViewerPageState extends State<ViewerPage> {
                                 if (mounted) {
                                   setState(() {
                                     clip.frames.add(frameData);
-                                    _frameCache.buildCache(clip.frames);
                                     // totalDetections and framesProcessed already
                                     // incremented in analyzeVideoFrames()
                                     if (frameData.isShootingMotion) {
