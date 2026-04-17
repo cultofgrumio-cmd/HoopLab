@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hooplab/pages/camera.dart';
-import 'package:hooplab/pages/live_shot_detector.dart';
 import 'package:hooplab/pages/viewer.dart' as viewer;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -329,26 +328,6 @@ class _MethodSelectorState extends State<MethodSelector>
           child: Text(text, style: const TextStyle(fontSize: 13, height: 1.3)),
         ),
       ],
-    );
-  }
-
-  Widget _buildLiveDetectionButton(ThemeData theme) {
-    return _MethodButton(
-      title: 'Live Detection',
-      subtitle: 'Real-time shot analysis',
-      icon: Icons.videocam,
-      onPressed: _isLoading
-          ? null
-          : () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const LiveShotDetector(),
-                ),
-              );
-            },
-      color: const Color(0xFF00C853), // Green for live
-      isLoading: _isLoading,
     );
   }
 
