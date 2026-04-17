@@ -406,42 +406,54 @@ class _ViewerPageState extends State<ViewerPage> {
         // Shot complete: went from UP → DOWN
         if (inUpRegion && inDownRegion && upFrameIndex < downFrameIndex) {
           if (currentShotFrames.length >= 10) {
+            // Select the hoop the ball was actually aimed at (handles
+            // multi-hoop scenes where a background hoop was detected first).
+            final targetHoop =
+                _findTargetHoop(currentShotFrames) ?? hoopPosition;
+
             final shot = Shot(
               id: shots.length,
               frames: List.from(currentShotFrames),
               startTime: currentShotFrames.first.timestamp,
               endTime: currentShotFrames.last.timestamp,
-              hoopPosition: hoopPosition,
+              hoopPosition: targetHoop,
             );
 
             // Calculate shot accuracy
             final ballTrajectory = currentShotBallPositions;
             if (ballTrajectory.length >= 3) {
-              // Get hoop bounding box for accuracy calculation
+              // Get hoop bounding box filtered to the target hoop only
               final hoopBBox = _getAverageHoopBBox(
                 upFrameIndex,
                 downFrameIndex,
                 null,
+                targetHoopPosition: targetHoop,
               );
 
               // Calculate accuracy percentage with dynamic hoop tracking
               final accuracyResult =
                   TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
                     ballPoints: ballTrajectory,
-                    hoopPosition: hoopPosition,
+                    hoopPosition: targetHoop,
                     hoopBBox: hoopBBox,
                     hoopRadius: hoopBBox != null ? hoopBBox.width / 2 : 30.0,
-                    frames: currentShotFrames, // Enable dynamic hoop tracking
+                    frames: currentShotFrames,
                   );
-              shot.accuracy = accuracyResult.accuracy;
-              shot.prediction = accuracyResult.accuracy > 50.0
-                  ? "MAKE"
-                  : "MISS"; // Keep for backward compatibility
+
+              // "made" label from model overrides rim crossing when present
+              final madeResult = TrajectoryPredictor.checkMadeDetection(
+                currentShotFrames,
+                targetHoop,
+              );
+
+              final finalResult = madeResult ?? accuracyResult;
+              shot.accuracy = finalResult.accuracy;
+              shot.prediction = finalResult.accuracy > 50.0 ? "MAKE" : "MISS";
 
               // Log confidence level
-              if (accuracyResult.confidence != ShotConfidence.high) {
+              if (finalResult.confidence != ShotConfidence.high) {
                 debugPrint(
-                  '⚠️ Shot ${shot.id} has ${accuracyResult.confidence} confidence: ${accuracyResult.reason}',
+                  '⚠️ Shot ${shot.id} has ${finalResult.confidence} confidence: ${finalResult.reason}',
                 );
               }
             }
@@ -568,35 +580,49 @@ class _ViewerPageState extends State<ViewerPage> {
                 hoopPosition: targetHoop,
               );
 
-              // Calculate shot accuracy
+              // Calculate shot accuracy using the specific hoop this shot
+              // was aimed at (not the global first-found hoop).
               final hoopBBox = _getAverageHoopBBox(
                 shootingStartFrame,
                 i - 1,
                 null,
+                targetHoopPosition: targetHoop,
               );
+              final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
 
               // Use rim crossing detection to determine if shot went in
               final rimCrossingResult =
                   TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
                     ballPoints: currentShotBallPositions,
-                    hoopPosition: hoopPosition ?? Offset.zero,
+                    hoopPosition: targetHoop,
                     hoopBBox: hoopBBox,
-                    hoopRadius: hoopBBox != null ? hoopBBox.width / 2 : 30.0,
+                    hoopRadius: hoopRadius,
                     frames: currentShotFrames,
                   );
+
+              // Secondary check: "made" label from model is direct visual
+              // evidence the ball went through the hoop — overrides rim
+              // crossing when present (especially useful in sideways view
+              // where Y-axis crossing geometry is unreliable).
+              final madeResult = TrajectoryPredictor.checkMadeDetection(
+                currentShotFrames,
+                targetHoop,
+              );
 
               // Also evaluate shot quality/form for additional feedback
               final qualityResult = ShotQualityEvaluator.evaluateShotQuality(
                 ballTrajectory: currentShotBallPositions,
-                hoopPosition: hoopPosition ?? Offset.zero,
-                hoopRadius: hoopBBox != null ? hoopBBox.width / 2 : 30.0,
+                hoopPosition: targetHoop,
+                hoopRadius: hoopRadius,
               );
 
-              // Primary metric: rim crossing accuracy (0-100% based on make/miss)
-              shot.accuracy = rimCrossingResult.accuracy;
+              // Use "made" detection if available, otherwise fall back to
+              // rim crossing geometry.
+              final finalResult = madeResult ?? rimCrossingResult;
+              shot.accuracy = finalResult.accuracy;
 
-              // Prediction: MAKE/MISS based on rim crossing + quality feedback
-              if (rimCrossingResult.accuracy > 50.0) {
+              // Prediction: MAKE/MISS based on final result + quality feedback
+              if (finalResult.accuracy > 50.0) {
                 shot.prediction = "MAKE • ${qualityResult.feedback}";
               } else {
                 shot.prediction = "MISS • ${qualityResult.feedback}";
@@ -629,12 +655,15 @@ class _ViewerPageState extends State<ViewerPage> {
 
     // Handle last shot if still in progress
     if (inShootingMotion && currentShotFrames.length >= 10) {
+      final lastTargetHoop =
+          _findTargetHoop(currentShotFrames) ?? hoopPosition;
+
       final shot = Shot(
         id: shots.length,
         frames: List.from(currentShotFrames),
         startTime: currentShotFrames.first.timestamp,
         endTime: currentShotFrames.last.timestamp,
-        hoopPosition: hoopPosition,
+        hoopPosition: lastTargetHoop,
       );
 
       if (currentShotBallPositions.length >= 5) {
@@ -642,26 +671,33 @@ class _ViewerPageState extends State<ViewerPage> {
           shootingStartFrame,
           clip.frames.length - 1,
           null,
+          targetHoopPosition: lastTargetHoop,
         );
         final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
 
         final rimCrossingResult =
             TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
               ballPoints: currentShotBallPositions,
-              hoopPosition: hoopPosition ?? Offset.zero,
+              hoopPosition: lastTargetHoop,
               hoopBBox: hoopBBox,
               hoopRadius: hoopRadius,
               frames: currentShotFrames,
             );
 
+        final madeResult = TrajectoryPredictor.checkMadeDetection(
+          currentShotFrames,
+          lastTargetHoop,
+        );
+
         final qualityResult = ShotQualityEvaluator.evaluateShotQuality(
           ballTrajectory: currentShotBallPositions,
-          hoopPosition: hoopPosition ?? Offset.zero,
+          hoopPosition: lastTargetHoop,
           hoopRadius: hoopRadius,
         );
 
-        shot.accuracy = rimCrossingResult.accuracy;
-        if (rimCrossingResult.accuracy > 50.0) {
+        final finalResult = madeResult ?? rimCrossingResult;
+        shot.accuracy = finalResult.accuracy;
+        if (finalResult.accuracy > 50.0) {
           shot.prediction = "MAKE • ${qualityResult.feedback}";
         } else {
           shot.prediction = "MISS • ${qualityResult.feedback}";
@@ -792,16 +828,167 @@ class _ViewerPageState extends State<ViewerPage> {
       return _averageOffset(positions);
     }
 
-    // Multiple hoops - find which one the ball gets closest to
+    // Multiple hoops: use rim crossing to identify which one the ball went
+    // through. "Minimum proximity" fails here because a central background
+    // hoop can have a small min-distance even if the ball never crossed it.
+    //
+    // Instead, run calculateShotAccuracyFromRimCrossing for each candidate.
+    // A confirmed rim crossing (high/medium confidence) means the ball
+    // actually passed through that hoop's plane. Low/insufficient confidence
+    // means only a proximity estimate — ball never crossed that rim.
+    final ballPositions = <Offset>[];
+    for (final frame in shotFrames) {
+      final ball = frame.detections
+          .where((d) => d.label.toLowerCase().contains('ball'))
+          .firstOrNull;
+      if (ball != null) {
+        ballPositions.add(Offset(ball.bbox.centerX, ball.bbox.centerY));
+      }
+    }
+
+    if (ballPositions.length >= 3) {
+      Offset? bestHoop;
+      double bestAccuracy = -1;
+      bool bestHasRimCrossing = false;
+
+      for (final entry in hoopPositions.entries) {
+        final avgHoopPos = _averageOffset(entry.value);
+        final bbox = _computeHoopBBoxForTarget(shotFrames, avgHoopPos);
+        final radius = bbox != null ? bbox.width / 2 : 30.0;
+
+        final result = TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
+          ballPoints: List.from(ballPositions),
+          hoopPosition: avgHoopPos,
+          hoopBBox: bbox,
+          hoopRadius: radius,
+          // No frames: static bbox, no dynamic tracking during hoop selection
+        );
+
+        final hasRimCrossing = result.confidence == ShotConfidence.high ||
+            result.confidence == ShotConfidence.medium;
+
+        debugPrint(
+          '  Hoop at (${avgHoopPos.dx.toInt()}, ${avgHoopPos.dy.toInt()}): '
+          'accuracy=${result.accuracy.toStringAsFixed(1)}% '
+          'confidence=${result.confidence} rimCrossing=$hasRimCrossing',
+        );
+
+        // Priority: confirmed rim crossing > proximity estimate.
+        // Within the same tier, higher accuracy wins.
+        if (!bestHasRimCrossing && hasRimCrossing) {
+          bestHasRimCrossing = true;
+          bestAccuracy = result.accuracy;
+          bestHoop = avgHoopPos;
+        } else if (bestHasRimCrossing == hasRimCrossing &&
+            result.accuracy > bestAccuracy) {
+          bestAccuracy = result.accuracy;
+          bestHoop = avgHoopPos;
+        }
+      }
+
+      // Only trust the rim-crossing result if it was a confirmed crossing.
+      // A proximity estimate (no confirmed crossing) is unreliable in
+      // sideways/court view — fall through to direction-of-travel instead.
+      if (bestHoop != null && bestHasRimCrossing) {
+        debugPrint(
+          '✅ Target hoop selected by rim crossing: '
+          '(${bestHoop.dx.toInt()}, ${bestHoop.dy.toInt()})',
+        );
+        return bestHoop;
+      }
+
+      // TIER 2: Direction of travel.
+      // The ball always moves toward the target hoop regardless of view angle.
+      // Dot product of (travel direction) · (vector from last ball pos to hoop)
+      // is positive for the target hoop and negative (or smaller) for hoops
+      // behind/beside the ball's path.  This is the same logic used in the
+      // trajectory overlay to draw the red ring on the correct hoop.
+      final firstBall = ballPositions.first;
+      final lastBall = ballPositions.last;
+      final travelDx = lastBall.dx - firstBall.dx;
+      final travelDy = lastBall.dy - firstBall.dy;
+      final travelMagSq = travelDx * travelDx + travelDy * travelDy;
+
+      if (travelMagSq > 100) {
+        Offset? dirHoop;
+        double bestDirAlignment = double.negativeInfinity;
+
+        for (final entry in hoopPositions.entries) {
+          final avgHoopPos = _averageOffset(entry.value);
+          final toHoopDx = avgHoopPos.dx - lastBall.dx;
+          final toHoopDy = avgHoopPos.dy - lastBall.dy;
+          final alignment = travelDx * toHoopDx + travelDy * toHoopDy;
+
+          debugPrint(
+            '  Direction check — hoop at (${avgHoopPos.dx.toInt()}, '
+            '${avgHoopPos.dy.toInt()}): alignment=${alignment.toStringAsFixed(0)}',
+          );
+
+          if (alignment > bestDirAlignment) {
+            bestDirAlignment = alignment;
+            dirHoop = avgHoopPos;
+          }
+        }
+
+        if (dirHoop != null && bestDirAlignment > 0) {
+          debugPrint(
+            '✅ Target hoop selected by direction of travel: '
+            '(${dirHoop.dx.toInt()}, ${dirHoop.dy.toInt()})',
+          );
+          return dirHoop;
+        }
+      }
+
+      // TIER 3: Endpoint proximity.
+      // Direction was ambiguous (ball barely moved). Fall back to which hoop
+      // the ball's final positions are closest to.
+      final endStart = (ballPositions.length * 0.7).round().clamp(
+        0,
+        ballPositions.length - 1,
+      );
+      final endPositions = ballPositions.sublist(endStart);
+
+      String? endpointHoopKey;
+      double endpointClosestAvg = double.infinity;
+
+      for (final hoopKey in hoopPositions.keys) {
+        final avgHoopPos = _averageOffset(hoopPositions[hoopKey]!);
+        double sumDist = 0;
+        for (final pos in endPositions) {
+          sumDist += (pos - avgHoopPos).distance;
+        }
+        final avgDist = sumDist / endPositions.length;
+
+        debugPrint(
+          '  Endpoint check — hoop at (${avgHoopPos.dx.toInt()}, '
+          '${avgHoopPos.dy.toInt()}): avg endpoint dist=${avgDist.toStringAsFixed(1)}px',
+        );
+
+        if (avgDist < endpointClosestAvg) {
+          endpointClosestAvg = avgDist;
+          endpointHoopKey = hoopKey;
+        }
+      }
+
+      if (endpointHoopKey != null) {
+        final targetPos = _averageOffset(hoopPositions[endpointHoopKey]!);
+        debugPrint(
+          '✅ Target hoop selected by endpoint proximity: '
+          '(${targetPos.dx.toInt()}, ${targetPos.dy.toInt()})',
+        );
+        return targetPos;
+      }
+    }
+
+    // TIER 3: All-frame minimum proximity — last resort fallback.
+    debugPrint('⚠️ Falling back to all-frame proximity-based hoop selection');
     Map<String, double> minDistances = {};
 
     for (final hoopKey in hoopPositions.keys) {
       final hoopPositionsList = hoopPositions[hoopKey]!;
       final avgHoopPos = _averageOffset(hoopPositionsList);
-
       double minDistance = double.infinity;
 
-      // Check distance from ball to this hoop across all frames
       for (final frame in shotFrames) {
         final ballDetections = frame.detections
             .where((d) => d.label.toLowerCase().contains('ball'))
@@ -812,18 +999,13 @@ class _ViewerPageState extends State<ViewerPage> {
             ballDetections.first.bbox.centerX,
             ballDetections.first.bbox.centerY,
           );
-
           final distance = (ballPos - avgHoopPos).distance;
-          if (distance < minDistance) {
-            minDistance = distance;
-          }
+          if (distance < minDistance) minDistance = distance;
         }
       }
-
       minDistances[hoopKey] = minDistance;
     }
 
-    // Find the hoop with minimum distance to ball
     String? targetHoopKey;
     double closestDistance = double.infinity;
 
@@ -841,12 +1023,49 @@ class _ViewerPageState extends State<ViewerPage> {
       final targetHoopPositions = hoopPositions[targetHoopKey]!;
       final targetPos = _averageOffset(targetHoopPositions);
       debugPrint(
-        '✅ Target hoop selected at (${targetPos.dx.toInt()}, ${targetPos.dy.toInt()})',
+        '✅ Target hoop selected by proximity: '
+        '(${targetPos.dx.toInt()}, ${targetPos.dy.toInt()})',
       );
       return targetPos;
     }
 
     return null;
+  }
+
+  /// Compute the average bounding box for a specific hoop directly from a
+  /// list of frames. Filters to detections within 100px of [targetHoopPos]
+  /// so background hoops don't pollute the result.
+  BoundingBox? _computeHoopBBoxForTarget(
+    List<FrameData> frames,
+    Offset targetHoopPos,
+  ) {
+    double sumX1 = 0, sumY1 = 0, sumX2 = 0, sumY2 = 0;
+    int count = 0;
+
+    for (final frame in frames) {
+      for (final d in frame.detections) {
+        if (!d.label.toLowerCase().contains('hoop') &&
+            !d.label.toLowerCase().contains('rim') &&
+            !d.label.toLowerCase().contains('basket')) continue;
+
+        final center = Offset(d.bbox.centerX, d.bbox.centerY);
+        if ((center - targetHoopPos).distance > 100) continue;
+
+        sumX1 += d.bbox.x1;
+        sumY1 += d.bbox.y1;
+        sumX2 += d.bbox.x2;
+        sumY2 += d.bbox.y2;
+        count++;
+      }
+    }
+
+    if (count == 0) return null;
+    return BoundingBox(
+      x1: sumX1 / count,
+      y1: sumY1 / count,
+      x2: sumX2 / count,
+      y2: sumY2 / count,
+    );
   }
 
   /// Calculate average of a list of offsets
@@ -866,8 +1085,9 @@ class _ViewerPageState extends State<ViewerPage> {
   BoundingBox? _getAverageHoopBBox(
     int startFrame,
     int endFrame,
-    Map<int, Offset>? hoopMap,
-  ) {
+    Map<int, Offset>? hoopMap, {
+    Offset? targetHoopPosition,
+  }) {
     double sumX1 = 0, sumY1 = 0, sumX2 = 0, sumY2 = 0;
     int count = 0;
 
@@ -886,6 +1106,12 @@ class _ViewerPageState extends State<ViewerPage> {
       );
 
       for (final hoop in hoopDetections) {
+        // When a target hoop is known, skip detections that belong to other
+        // hoops (i.e. background hoops more than 100px away).
+        if (targetHoopPosition != null) {
+          final center = Offset(hoop.bbox.centerX, hoop.bbox.centerY);
+          if ((center - targetHoopPosition).distance > 100) continue;
+        }
         sumX1 += hoop.bbox.x1;
         sumY1 += hoop.bbox.y1;
         sumX2 += hoop.bbox.x2;

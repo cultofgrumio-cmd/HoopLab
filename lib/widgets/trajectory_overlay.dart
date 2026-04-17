@@ -264,28 +264,21 @@ class TrajectoryPainter extends CustomPainter {
     );
   }
 
-  /// Find hoop position from detections at current video time
-  /// Falls back to nearest hoop detection if not found at exact time
+  /// Find hoop position from detections at current video time.
+  /// When multiple hoops are detected, uses ball direction of travel
+  /// (computed from ALL frames) to pick the one the ball is heading toward.
   Offset? _findHoopPosition() {
     final currentTimeMs = currentVideoPosition.inMilliseconds.toDouble();
 
-    // First, try to find hoop in frames near current time
+    // Find the frame closest to current time that has a hoop detection
     FrameData? frameWithHoop;
     double minTimeDiff = double.infinity;
 
     for (final frame in frames) {
       final frameTimeMs = frame.timestamp * 1000;
-
-      // Only consider frames up to current time (already played)
       if (frameTimeMs > currentTimeMs) break;
 
-      final hasHoop = frame.detections.any(
-        (d) =>
-            d.label.toLowerCase().contains('hoop') ||
-            d.label.toLowerCase().contains('rim') ||
-            d.label.toLowerCase().contains('basket'),
-      );
-
+      final hasHoop = frame.detections.any(_isHoopDetection);
       if (hasHoop) {
         final timeDiff = (frameTimeMs - currentTimeMs).abs();
         if (timeDiff < minTimeDiff) {
@@ -297,24 +290,17 @@ class TrajectoryPainter extends CustomPainter {
 
     if (frameWithHoop == null) return null;
 
-    final hoopDetections = frameWithHoop.detections
-        .where(
-          (d) =>
-              d.label.toLowerCase().contains('hoop') ||
-              d.label.toLowerCase().contains('rim') ||
-              d.label.toLowerCase().contains('basket'),
-        )
-        .toList();
+    final hoopDetections =
+        frameWithHoop.detections.where(_isHoopDetection).toList();
+    if (hoopDetections.isEmpty) return null;
 
-    if (hoopDetections.isNotEmpty) {
-      final hoop = hoopDetections.first;
-      return Offset(hoop.bbox.centerX, hoop.bbox.centerY);
-    }
-
-    return null;
+    final hoop = _getTargetHoopDetection(hoopDetections);
+    if (hoop == null) return null;
+    return Offset(hoop.bbox.centerX, hoop.bbox.centerY);
   }
 
-  /// Get hoop bounding box at current video time
+  /// Get hoop bounding box at current video time.
+  /// Uses the same direction-based hoop selection as [_findHoopPosition].
   BoundingBox? _findHoopBBox() {
     final currentTimeMs = currentVideoPosition.inMilliseconds.toDouble();
 
@@ -324,31 +310,77 @@ class TrajectoryPainter extends CustomPainter {
     for (final frame in frames) {
       final frameTimeMs = frame.timestamp * 1000;
       final timeDiff = (frameTimeMs - currentTimeMs).abs();
-
       if (timeDiff < minTimeDiff) {
         minTimeDiff = timeDiff;
         closestFrame = frame;
       }
-
       if (frameTimeMs > currentTimeMs + 100) break;
     }
 
     if (closestFrame == null) return null;
 
-    final hoopDetections = closestFrame.detections
-        .where(
-          (d) =>
-              d.label.toLowerCase().contains('hoop') ||
-              d.label.toLowerCase().contains('rim') ||
-              d.label.toLowerCase().contains('basket'),
-        )
-        .toList();
+    final hoopDetections =
+        closestFrame.detections.where(_isHoopDetection).toList();
+    return _getTargetHoopDetection(hoopDetections)?.bbox;
+  }
 
-    if (hoopDetections.isNotEmpty) {
-      return hoopDetections.first.bbox;
+  /// Returns true if [d] is a hoop/rim/basket detection.
+  bool _isHoopDetection(Detection d) =>
+      d.label.toLowerCase().contains('hoop') ||
+      d.label.toLowerCase().contains('rim') ||
+      d.label.toLowerCase().contains('basket');
+
+  /// From a list of hoop detections in a single frame, pick the one the ball
+  /// is heading toward. Uses the ball's overall direction of travel (first→last
+  /// ball position across ALL frames) so the result is stable during playback.
+  ///
+  /// In court/sideways view the background hoop sits at the opposite side from
+  /// the target — the direction vector from the ball's final position to the
+  /// target hoop is positive (aligned with travel), while the background hoop
+  /// is behind or perpendicular (negative / near-zero alignment).
+  Detection? _getTargetHoopDetection(List<Detection> hoopDetections) {
+    if (hoopDetections.isEmpty) return null;
+    if (hoopDetections.length == 1) return hoopDetections.first;
+
+    // Compute ball direction from ALL frames for a stable reference
+    Offset? firstBall, lastBall;
+    for (final frame in frames) {
+      final ball =
+          frame.detections.where((d) => d.label.toLowerCase().contains('ball')).firstOrNull;
+      if (ball != null) {
+        firstBall ??= Offset(ball.bbox.centerX, ball.bbox.centerY);
+        lastBall = Offset(ball.bbox.centerX, ball.bbox.centerY);
+      }
     }
 
-    return null;
+    if (firstBall == null || lastBall == null) return hoopDetections.first;
+
+    final travelDx = lastBall.dx - firstBall.dx;
+    final travelDy = lastBall.dy - firstBall.dy;
+
+    // Ball didn't move meaningfully — can't determine direction
+    if (travelDx * travelDx + travelDy * travelDy < 100) {
+      return hoopDetections.first;
+    }
+
+    Detection? best;
+    double bestAlignment = double.negativeInfinity;
+
+    for (final hoop in hoopDetections) {
+      // Dot product of (travel direction) · (vector from last ball to hoop)
+      final toHoopDx = hoop.bbox.centerX - lastBall.dx;
+      final toHoopDy = hoop.bbox.centerY - lastBall.dy;
+      final alignment = travelDx * toHoopDx + travelDy * toHoopDy;
+
+      if (alignment > bestAlignment) {
+        bestAlignment = alignment;
+        best = hoop;
+      }
+    }
+
+    // Only commit to the directional choice when it clearly points forward
+    if (best != null && bestAlignment > 0) return best;
+    return hoopDetections.first;
   }
 
   /// Draw hoop

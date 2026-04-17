@@ -247,13 +247,14 @@ class TrajectoryPredictor {
       );
     }
 
-    // Use dynamic hoop tracking if frames are provided
+    // Use dynamic hoop tracking if frames are provided.
+    // initialHoopPosition is used as an anchor so per-frame updates always
+    // prefer the same hoop (avoids drifting to a background hoop).
+    final initialHoopPosition = hoopPosition;
     Offset activeHoopPosition = hoopPosition;
     BoundingBox? activeHoopBBox = hoopBBox;
 
     if (frames != null && frames.isNotEmpty) {
-      // Find the frame where rim crossing occurs
-      // We'll update hoop position dynamically as we search
       debugPrint(
         '🎯 Using dynamic hoop tracking across ${frames.length} frames',
       );
@@ -268,13 +269,20 @@ class TrajectoryPredictor {
     int? crossingFrameIndex;
 
     for (int i = points.length - 1; i >= 0; i--) {
-      // Update hoop position for this frame if using dynamic tracking
+      // Update hoop position for this frame if using dynamic tracking.
+      // Pass initialHoopPosition as reference so that in multi-hoop scenes
+      // we always track the originally-selected hoop, not a background one.
       if (frames != null && i < frames.length) {
-        final frameHoop = _getHoopFromFrame(frames[i]);
+        final frameHoop = _getHoopFromFrame(
+          frames[i],
+          referencePosition: initialHoopPosition,
+        );
         if (frameHoop != null) {
           activeHoopPosition = frameHoop;
-          // Recalculate rim height for this frame's hoop position
-          final frameHoopBBox = _getHoopBBoxFromFrame(frames[i]);
+          final frameHoopBBox = _getHoopBBoxFromFrame(
+            frames[i],
+            referencePosition: initialHoopPosition,
+          );
           if (frameHoopBBox != null) {
             activeHoopBBox = frameHoopBBox;
           }
@@ -428,25 +436,51 @@ class TrajectoryPredictor {
     return hasPointsAboveRim && hasPointsBelowRim && hasAscent;
   }
 
-  /// Get hoop position from a single frame
-  static Offset? _getHoopFromFrame(FrameData frame) {
-    final hoopDetections = frame.detections
-        .where(
-          (d) =>
-              d.label.toLowerCase().contains('hoop') ||
-              d.label.toLowerCase().contains('rim') ||
-              d.label.toLowerCase().contains('basket'),
-        )
-        .toList();
-
-    if (hoopDetections.isEmpty) return null;
-
-    final hoop = hoopDetections.first;
-    return Offset(hoop.bbox.centerX, hoop.bbox.centerY);
+  /// Check whether any frame in [frames] contains a "made" detection near
+  /// [targetHoopPosition]. The model emits a "made" label when the ball is
+  /// visually inside the hoop, giving direct evidence that the shot went in
+  /// regardless of whether the Y-axis rim-crossing geometry fired.
+  ///
+  /// [proximityThreshold] is the max distance (px) between the "made"
+  /// detection center and the target hoop center. A generous default (200 px)
+  /// handles both backboard and sideways view where coordinates can differ.
+  ///
+  /// Returns a high-confidence MAKE result when found, null otherwise.
+  static ShotAccuracyResult? checkMadeDetection(
+    List<FrameData> frames,
+    Offset targetHoopPosition, {
+    double proximityThreshold = 200.0,
+  }) {
+    for (final frame in frames) {
+      for (final d in frame.detections) {
+        if (d.label.toLowerCase().contains('made')) {
+          final pos = Offset(d.bbox.centerX, d.bbox.centerY);
+          final dist = (pos - targetHoopPosition).distance;
+          if (dist <= proximityThreshold) {
+            debugPrint(
+              '✅ "made" label detected at (${pos.dx.toInt()}, ${pos.dy.toInt()}) '
+              '— ${dist.toStringAsFixed(0)}px from target hoop',
+            );
+            return ShotAccuracyResult(
+              accuracy: 95.0,
+              confidence: ShotConfidence.high,
+              reason: '"made" label detected by model',
+            );
+          }
+        }
+      }
+    }
+    return null;
   }
 
-  /// Get hoop bounding box from a single frame
-  static BoundingBox? _getHoopBBoxFromFrame(FrameData frame) {
+  /// Get hoop position from a single frame.
+  /// When [referencePosition] is provided and multiple hoops are detected,
+  /// returns the one closest to [referencePosition] to avoid drifting to a
+  /// background hoop.
+  static Offset? _getHoopFromFrame(
+    FrameData frame, {
+    Offset? referencePosition,
+  }) {
     final hoopDetections = frame.detections
         .where(
           (d) =>
@@ -457,8 +491,60 @@ class TrajectoryPredictor {
         .toList();
 
     if (hoopDetections.isEmpty) return null;
+    if (referencePosition == null || hoopDetections.length == 1) {
+      final hoop = hoopDetections.first;
+      return Offset(hoop.bbox.centerX, hoop.bbox.centerY);
+    }
 
-    return hoopDetections.first.bbox;
+    // Multiple hoops — return the one closest to the reference (target) hoop
+    Detection? closest;
+    double minDist = double.infinity;
+    for (final hoop in hoopDetections) {
+      final pos = Offset(hoop.bbox.centerX, hoop.bbox.centerY);
+      final dist = (pos - referencePosition).distance;
+      if (dist < minDist) {
+        minDist = dist;
+        closest = hoop;
+      }
+    }
+    return closest != null
+        ? Offset(closest.bbox.centerX, closest.bbox.centerY)
+        : null;
+  }
+
+  /// Get hoop bounding box from a single frame.
+  /// When [referencePosition] is provided and multiple hoops are detected,
+  /// returns the bbox of the one closest to [referencePosition].
+  static BoundingBox? _getHoopBBoxFromFrame(
+    FrameData frame, {
+    Offset? referencePosition,
+  }) {
+    final hoopDetections = frame.detections
+        .where(
+          (d) =>
+              d.label.toLowerCase().contains('hoop') ||
+              d.label.toLowerCase().contains('rim') ||
+              d.label.toLowerCase().contains('basket'),
+        )
+        .toList();
+
+    if (hoopDetections.isEmpty) return null;
+    if (referencePosition == null || hoopDetections.length == 1) {
+      return hoopDetections.first.bbox;
+    }
+
+    // Multiple hoops — return the bbox of the one closest to the reference hoop
+    Detection? closest;
+    double minDist = double.infinity;
+    for (final hoop in hoopDetections) {
+      final pos = Offset(hoop.bbox.centerX, hoop.bbox.centerY);
+      final dist = (pos - referencePosition).distance;
+      if (dist < minDist) {
+        minDist = dist;
+        closest = hoop;
+      }
+    }
+    return closest?.bbox;
   }
 
   /// Perform linear regression for either X or Y coordinates

@@ -3,7 +3,20 @@
     "allow": [
       "Bash(rtk git:*)",
       "Bash(rtk ls:*)",
-      "Bash(dart analyze:*)"
+      "Bash(dart analyze:*)",
+      "Bash(rtk dart:*)",
+      "Bash(where pandoc:*)",
+      "Bash(where wkhtmltopdf:*)",
+      "Bash(where chromium:*)",
+      "Bash(where chrome:*)",
+      "Bash(python -c \"import weasyprint; print\\('weasyprint ok'\\)\")",
+      "Bash(pandoc --version)",
+      "Bash(where xelatex:*)",
+      "Bash(where pdflatex:*)",
+      "Bash(where lualatex:*)",
+      "Bash(pandoc hooplab_technical_overview.md -o hooplab_technical_overview.pdf --pdf-engine=xelatex --toc --toc-depth=2 -V mainfont=\"Segoe UI\" -V monofont=\"Consolas\")",
+      "Bash(miktex-update --admin)",
+      "Bash(miktex --version)"
     ]
   }
 }
