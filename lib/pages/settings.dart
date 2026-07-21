@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:hooplab/models/app_accent.dart';
+import 'package:hooplab/models/handedness.dart';
 import 'package:hooplab/models/recording_mode.dart';
+import 'package:hooplab/pages/help_faq.dart';
+import 'package:hooplab/pages/user_manual.dart';
+import 'package:hooplab/services/handedness_storage.dart';
 import 'package:hooplab/services/recording_mode_storage.dart';
 import 'package:hooplab/services/theme_storage.dart';
 
@@ -32,7 +37,22 @@ class SettingsPage extends StatelessWidget {
           ),
           const _RecordingModeSelector(),
 
+          _SectionHeader(title: 'Player'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(
+              'Set your shooting hand so on-screen guidance and form analysis '
+              'are oriented to the correct side.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+              ),
+            ),
+          ),
+          const _HandednessSelector(),
+
           _SectionHeader(title: 'Appearance'),
+          const _ColorThemePicker(),
+          const SizedBox(height: 4),
           ValueListenableBuilder<ThemeMode>(
             valueListenable: themeModeNotifier,
             builder: (context, mode, _) {
@@ -59,15 +79,24 @@ class SettingsPage extends StatelessWidget {
               );
             },
           ),
-          const SizedBox(height: 24),
-          Center(
-            child: Text(
-              'More settings coming soon',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-              ),
+          _SectionHeader(title: 'Help & guides'),
+          _NavTile(
+            icon: Icons.menu_book_outlined,
+            title: 'User manual',
+            subtitle: 'How to set up, record and review your shots',
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const UserManualPage()),
             ),
           ),
+          _NavTile(
+            icon: Icons.help_outline,
+            title: 'Help & FAQ',
+            subtitle: 'Common questions about how HoopLab works',
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const HelpFaqPage()),
+            ),
+          ),
+          const SizedBox(height: 24),
         ],
       ),
     );
@@ -318,6 +347,169 @@ class _ModeDiagramPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ModeDiagramPainter old) =>
       old.mode != mode || old.accent != accent || old.line != line;
+}
+
+/// Right / left shooting-hand toggle. Selecting one persists it immediately.
+class _HandednessSelector extends StatelessWidget {
+  const _HandednessSelector();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: ValueListenableBuilder<Handedness>(
+        valueListenable: handednessNotifier,
+        builder: (context, active, _) {
+          return SegmentedButton<Handedness>(
+            segments: const [
+              ButtonSegment(
+                value: Handedness.right,
+                label: Text('Right-handed'),
+                icon: Icon(Icons.back_hand_outlined),
+              ),
+              ButtonSegment(
+                value: Handedness.left,
+                label: Text('Left-handed'),
+                icon: Icon(Icons.front_hand_outlined),
+              ),
+            ],
+            selected: {active},
+            onSelectionChanged: (selection) =>
+                HandednessStorage.set(selection.first),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// A row of colour swatches for choosing the app's [AppAccent]. Selecting one
+/// persists it immediately and repaints the whole app via [themeAccentNotifier].
+class _ColorThemePicker extends StatelessWidget {
+  const _ColorThemePicker();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Color theme',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 10),
+          ValueListenableBuilder<AppAccent>(
+            valueListenable: themeAccentNotifier,
+            builder: (context, active, _) {
+              return Wrap(
+                spacing: 14,
+                runSpacing: 14,
+                children: [
+                  for (final accent in AppAccent.values)
+                    _ColorSwatch(
+                      accent: accent,
+                      selected: accent == active,
+                      onTap: () => ThemeStorage.setAccent(accent),
+                    ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ColorSwatch extends StatelessWidget {
+  final AppAccent accent;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ColorSwatch({
+    required this.accent,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      label: accent.label,
+      selected: selected,
+      button: true,
+      child: Tooltip(
+        message: accent.label,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(24),
+          onTap: onTap,
+          child: Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: accent.sample,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: selected
+                    ? scheme.onSurface
+                    : scheme.onSurface.withValues(alpha: 0.15),
+                width: selected ? 3 : 1,
+              ),
+            ),
+            child: selected
+                ? const Icon(Icons.check, color: Colors.white, size: 22)
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A tappable settings row that navigates elsewhere (manual, FAQ).
+class _NavTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const _NavTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ListTile(
+      leading: Icon(icon, color: theme.colorScheme.primary),
+      title: Text(
+        title,
+        style: theme.textTheme.titleSmall?.copyWith(
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+        ),
+      ),
+      trailing: Icon(
+        Icons.chevron_right,
+        color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+      ),
+      onTap: onTap,
+    );
+  }
 }
 
 class _SectionHeader extends StatelessWidget {
