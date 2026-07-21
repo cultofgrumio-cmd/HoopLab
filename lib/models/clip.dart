@@ -112,6 +112,10 @@ class Shot {
   bool? predictedMake; // Predicted at release, before the outcome is visible
   double? predictedAccuracy; // Projected centeredness at the rim (0-100%)
   Offset? hoopPosition;
+  Offset? footAnchor; // Shooter's on-floor position at release (image pixels)
+  Offset? courtPosition; // Shot origin in court feet (basket at origin)
+  String? zone; // CourtZone.name the shot was taken from
+  double? rimWidth; // Rim bbox width in image pixels (scale reference)
 
   Shot({
     required this.id,
@@ -125,6 +129,10 @@ class Shot {
     this.predictedMake,
     this.predictedAccuracy,
     this.hoopPosition,
+    this.footAnchor,
+    this.courtPosition,
+    this.zone,
+    this.rimWidth,
   });
 
   /// True when this shot was scored a make (accuracy above the make threshold).

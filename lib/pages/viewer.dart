@@ -7,6 +7,8 @@ import 'package:hooplab/models/recording_mode.dart';
 import 'package:hooplab/models/session.dart';
 import 'package:hooplab/services/recording_mode_storage.dart';
 import 'package:hooplab/services/session_storage.dart';
+import 'package:hooplab/utils/court.dart';
+import 'package:hooplab/utils/court_calibration.dart';
 import 'package:hooplab/utils/make_detector.dart';
 import 'package:hooplab/utils/shot_detector.dart';
 import 'package:hooplab/utils/shot_predictor.dart';
@@ -453,6 +455,25 @@ class _ViewerPageState extends State<ViewerPage> {
     if (prediction.isKnown) {
       shot.predictedMake = prediction.willMake;
       shot.predictedAccuracy = prediction.accuracy;
+    }
+
+    // Shot location: find the shooter's on-floor position (foot anchor), then
+    // place it on the court. Uncalibrated (Tier 0) uses the rim's known width as
+    // a scale reference; a free-throw calibration can upgrade this later without
+    // re-analysing, since the foot anchor is stored on the shot.
+    final rimWidth = hoopBBox != null ? hoopBBox.width.abs() : hoopRadius * 2;
+    final footAnchor =
+        FootAnchorEstimator.estimate(shot.frames, rimWidth: rimWidth);
+    shot.footAnchor = footAnchor;
+    shot.rimWidth = rimWidth;
+    final loc = CourtCalibration.none
+        .locate(footAnchor, rimCenter: targetHoop, rimWidth: rimWidth);
+    if (loc != null) {
+      shot.courtPosition = loc.courtFeet;
+      shot.zone = loc.zone.storageKey;
+      debugPrint('📍 Shot ${shot.id} zone=${loc.zone.label} '
+          'court=(${loc.courtFeet.dx.toStringAsFixed(1)}, '
+          '${loc.courtFeet.dy.toStringAsFixed(1)})ft');
     }
 
     if (finalResult.confidence != ShotConfidence.high) {
@@ -1053,6 +1074,10 @@ class _ViewerPageState extends State<ViewerPage> {
       predictedAccuracy: shot.predictedAccuracy,
       ballTrajectory: shot.ballTrajectory,
       hoopPosition: shot.hoopPosition,
+      footAnchor: shot.footAnchor,
+      courtPosition: shot.courtPosition,
+      zone: shot.zone,
+      rimWidth: shot.rimWidth,
     );
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hooplab/models/session.dart';
+import 'package:hooplab/pages/shot_map.dart';
 import 'package:hooplab/services/session_storage.dart';
 
 class ShotLogPage extends StatefulWidget {
@@ -90,6 +91,18 @@ class _ShotLogPageState extends State<ShotLogPage> {
           foregroundColor: Theme.of(context).colorScheme.onSurface,
           elevation: 0,
           actions: [
+            IconButton(
+              icon: const Icon(Icons.map_rounded),
+              tooltip: 'Shot map',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ShotMapPage(session: widget.session),
+                  ),
+                );
+              },
+            ),
             if (_dirty)
               _saving
                   ? const Padding(
