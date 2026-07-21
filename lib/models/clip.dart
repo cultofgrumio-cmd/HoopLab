@@ -109,6 +109,8 @@ class Shot {
   double? accuracy; // Shot accuracy percentage (0-100%)
   double? formScore; // Shooting-form quality score (0-100), independent of make/miss
   String? feedback; // Human-readable form feedback
+  bool? predictedMake; // Predicted at release, before the outcome is visible
+  double? predictedAccuracy; // Projected centeredness at the rim (0-100%)
   Offset? hoopPosition;
 
   Shot({
@@ -120,6 +122,8 @@ class Shot {
     this.accuracy,
     this.formScore,
     this.feedback,
+    this.predictedMake,
+    this.predictedAccuracy,
     this.hoopPosition,
   });
 

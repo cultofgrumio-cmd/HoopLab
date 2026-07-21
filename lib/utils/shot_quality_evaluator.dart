@@ -1,5 +1,62 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:hooplab/models/recording_mode.dart';
+
+/// Camera-geometry tuning for the ball-flight (arc + release-angle) scoring.
+///
+/// The *same* real shot projects to a different on-screen arc depending on the
+/// rig. The default reproduces the tripod (near-true-geometry) bands. In
+/// **ground** mode the phone is tilted up, which foreshortens the vertical axis:
+/// a genuine 50° release reads as a much shallower on-screen angle and the arc
+/// looks flatter, so the "good" bands are shifted lower — otherwise a perfectly
+/// good shot filmed from the ground would always be marked as too flat.
+class ShotArcProfile {
+  /// Release-angle band that scores a full 1.0 (degrees, on screen).
+  final double releaseIdealLow;
+  final double releaseIdealHigh;
+
+  /// Wider band that still scores partially (outside it → 0.2).
+  final double releaseAcceptLow;
+  final double releaseAcceptHigh;
+
+  /// Degrees of falloff used to grade angles inside the accept band.
+  final double releaseFalloff;
+
+  /// Arc-height ratio (peak rise ÷ vertical distance to hoop) that scores 1.0.
+  final double arcRatioIdealLow;
+  final double arcRatioIdealHigh;
+
+  /// Wider arc-ratio band that still scores 0.7.
+  final double arcRatioOkLow;
+  final double arcRatioOkHigh;
+
+  const ShotArcProfile({
+    this.releaseIdealLow = 45,
+    this.releaseIdealHigh = 55,
+    this.releaseAcceptLow = 35,
+    this.releaseAcceptHigh = 65,
+    this.releaseFalloff = 20,
+    this.arcRatioIdealLow = 1.2,
+    this.arcRatioIdealHigh = 1.8,
+    this.arcRatioOkLow = 0.8,
+    this.arcRatioOkHigh = 2.2,
+  });
+
+  factory ShotArcProfile.forMode(RecordingMode mode) => switch (mode) {
+        RecordingMode.tripod => const ShotArcProfile(),
+        RecordingMode.ground => const ShotArcProfile(
+            releaseIdealLow: 30,
+            releaseIdealHigh: 48,
+            releaseAcceptLow: 20,
+            releaseAcceptHigh: 60,
+            releaseFalloff: 22,
+            arcRatioIdealLow: 0.7,
+            arcRatioIdealHigh: 1.3,
+            arcRatioOkLow: 0.45,
+            arcRatioOkHigh: 1.7,
+          ),
+      };
+}
 
 /// Evaluates shot quality based on form/technique, not whether it went in
 class ShotQualityEvaluator {
@@ -9,6 +66,7 @@ class ShotQualityEvaluator {
     required List<Offset> ballTrajectory,
     required Offset hoopPosition,
     double hoopRadius = 30.0,
+    ShotArcProfile profile = const ShotArcProfile(),
   }) {
     if (ballTrajectory.length < 5) {
       return ShotQualityResult(
@@ -17,15 +75,16 @@ class ShotQualityEvaluator {
         releaseAngleScore: 0.0,
         distanceScore: 0.0,
         consistencyScore: 0.0,
+        cues: const [],
         feedback: 'Not enough data to evaluate shot',
       );
     }
 
     // 1. Arc Quality (0-30 points) - Does the ball have a good arc?
-    final arcScore = _evaluateArc(ballTrajectory, hoopPosition);
+    final arcScore = _evaluateArc(ballTrajectory, hoopPosition, profile);
 
     // 2. Release Angle (0-25 points) - Is the initial trajectory angle good?
-    final releaseAngleScore = _evaluateReleaseAngle(ballTrajectory);
+    final releaseAngleScore = _evaluateReleaseAngle(ballTrajectory, profile);
 
     // 3. Distance to Target (0-25 points) - How close did it get to the hoop?
     final distanceScore = _evaluateDistanceToHoop(
@@ -45,8 +104,7 @@ class ShotQualityEvaluator {
         );
 
     // Generate feedback
-    final feedback = _generateFeedback(
-      overallScore: overallScore,
+    final cues = _generateCues(
       arcScore: arcScore,
       releaseAngleScore: releaseAngleScore,
       distanceScore: distanceScore,
@@ -59,12 +117,17 @@ class ShotQualityEvaluator {
       releaseAngleScore: releaseAngleScore,
       distanceScore: distanceScore,
       consistencyScore: consistencyScore,
-      feedback: feedback,
+      cues: cues,
+      feedback: cues.join(' • '),
     );
   }
 
   /// Evaluate the arc quality (parabolic shape)
-  static double _evaluateArc(List<Offset> trajectory, Offset hoopPosition) {
+  static double _evaluateArc(
+    List<Offset> trajectory,
+    Offset hoopPosition,
+    ShotArcProfile profile,
+  ) {
     if (trajectory.length < 5) return 0.0;
 
     // Find the highest point in the trajectory
@@ -97,9 +160,11 @@ class ShotQualityEvaluator {
         : 0;
 
     double arcHeightScore;
-    if (arcHeightRatio >= 1.2 && arcHeightRatio <= 1.8) {
+    if (arcHeightRatio >= profile.arcRatioIdealLow &&
+        arcHeightRatio <= profile.arcRatioIdealHigh) {
       arcHeightScore = 1.0; // good arc height
-    } else if (arcHeightRatio >= 0.8 && arcHeightRatio <= 2.2) {
+    } else if (arcHeightRatio >= profile.arcRatioOkLow &&
+        arcHeightRatio <= profile.arcRatioOkHigh) {
       arcHeightScore = 0.7; // Acceptable
     } else {
       arcHeightScore = 0.3; // Too flat / high
@@ -109,8 +174,13 @@ class ShotQualityEvaluator {
     return (peakPositionScore * 15 + arcHeightScore * 15);
   }
 
-  /// Evaluate the release angle
-  static double _evaluateReleaseAngle(List<Offset> trajectory) {
+  /// Evaluate the release angle. The "good" band is supplied by [profile]
+  /// because the on-screen angle of a given real release depends on the camera
+  /// rig (a tilted-up ground shot foreshortens the vertical, reading flatter).
+  static double _evaluateReleaseAngle(
+    List<Offset> trajectory,
+    ShotArcProfile profile,
+  ) {
     if (trajectory.length < 3) return 0.0;
 
     // Calculate initial trajectory angle from first 3 points
@@ -124,17 +194,17 @@ class ShotQualityEvaluator {
     final angleRadians = atan2(-dy, dx);
     final angleDegrees = angleRadians * 180 / pi;
 
-    // Optimal release angle is 45-55 degrees
-    // Acceptable range is 35-65 degrees
     double angleScore;
-    if (angleDegrees >= 45 && angleDegrees <= 55) {
-      angleScore = 1.0; // This is a good value you can use.
-    } else if (angleDegrees >= 35 && angleDegrees <= 65) {
+    if (angleDegrees >= profile.releaseIdealLow &&
+        angleDegrees <= profile.releaseIdealHigh) {
+      angleScore = 1.0; // in the ideal band
+    } else if (angleDegrees >= profile.releaseAcceptLow &&
+        angleDegrees <= profile.releaseAcceptHigh) {
       final deviation = min(
-        (angleDegrees - 45).abs(),
-        (angleDegrees - 55).abs(),
+        (angleDegrees - profile.releaseIdealLow).abs(),
+        (angleDegrees - profile.releaseIdealHigh).abs(),
       );
-      angleScore = 1.0 - (deviation / 20); // Gradual falloff
+      angleScore = 1.0 - (deviation / profile.releaseFalloff); // Gradual falloff
     } else {
       angleScore = 0.2; // Too flat or too steep
     }
@@ -221,39 +291,34 @@ class ShotQualityEvaluator {
     return consistencyScore * 20; // Max 20 points
   }
 
-  static String _generateFeedback({
-    required double overallScore,
+  /// Specific, actionable cues drawn from the ball flight only (the body
+  /// mechanics — arm angles, knee bend — are covered separately by
+  /// [ShootingFormAnalyzer]). Ordered most-impactful first; empty when the
+  /// flight looks clean.
+  static List<String> _generateCues({
     required double arcScore,
     required double releaseAngleScore,
     required double distanceScore,
     required double consistencyScore,
   }) {
-    List<String> feedback = [];
-    if (overallScore >= 85) {
-      feedback.add('Excellent shot form!');
-    } else if (overallScore >= 70) {
-      feedback.add('Good shot form');
-    } else if (overallScore >= 50) {
-      feedback.add('Decent form, room for improvement');
-    } else {
-      feedback.add('Needs work on technique');
+    final cues = <String>[];
+
+    // Arc + release angle both speak to trajectory shape; lead with whichever
+    // is weaker so we don't stack two near-identical "arc" notes.
+    if (releaseAngleScore < 15) {
+      cues.add('Raise your release angle toward 45–55° for a softer arc.');
+    } else if (arcScore < 18) {
+      cues.add('Arc is flat — get more height so the ball drops into the rim.');
     }
 
-    // Specific feedback
-    if (arcScore < 20) {
-      feedback.add('Arc too flat or inconsistent');
-    }
-    if (releaseAngleScore < 15) {
-      feedback.add('Adjust release angle (aim for 45-55°)');
+    if (consistencyScore < 12) {
+      cues.add('Smooth out the release — the ball flight is wobbling.');
     }
     if (distanceScore < 15) {
-      feedback.add('Shot accuracy needs improvement');
-    }
-    if (consistencyScore < 12) {
-      feedback.add('Work on smoother release');
+      cues.add('Dial in your aim — the ball missed the rim by a wide margin.');
     }
 
-    return feedback.join(' • ');
+    return cues;
   }
 }
 
@@ -264,7 +329,8 @@ class ShotQualityResult {
   final double releaseAngleScore; // 0-25
   final double distanceScore; // 0-25
   final double consistencyScore; // 0-20
-  final String feedback;
+  final List<String> cues; // specific ball-flight cues, most-impactful first
+  final String feedback; // cues joined for single-line display
 
   ShotQualityResult({
     required this.overallScore,
@@ -272,6 +338,7 @@ class ShotQualityResult {
     required this.releaseAngleScore,
     required this.distanceScore,
     required this.consistencyScore,
+    required this.cues,
     required this.feedback,
   });
 }

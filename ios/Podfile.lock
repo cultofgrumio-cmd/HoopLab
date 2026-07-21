@@ -7,6 +7,8 @@ PODS:
   - ffmpeg_kit_flutter_new/full-gpl (1.0.0):
     - Flutter
   - Flutter (1.0.0)
+  - flutter_tts (0.0.1):
+    - Flutter
   - google_mlkit_commons (0.9.0):
     - Flutter
     - MLKitVision
@@ -99,6 +101,7 @@ DEPENDENCIES:
   - camera_avfoundation (from `.symlinks/plugins/camera_avfoundation/ios`)
   - ffmpeg_kit_flutter_new (from `.symlinks/plugins/ffmpeg_kit_flutter_new/ios`)
   - Flutter (from `Flutter`)
+  - flutter_tts (from `.symlinks/plugins/flutter_tts/ios`)
   - google_mlkit_commons (from `.symlinks/plugins/google_mlkit_commons/ios`)
   - google_mlkit_pose_detection (from `.symlinks/plugins/google_mlkit_pose_detection/ios`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
@@ -134,6 +137,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/ffmpeg_kit_flutter_new/ios"
   Flutter:
     :path: Flutter
+  flutter_tts:
+    :path: ".symlinks/plugins/flutter_tts/ios"
   google_mlkit_commons:
     :path: ".symlinks/plugins/google_mlkit_commons/ios"
   google_mlkit_pose_detection:
@@ -159,6 +164,7 @@ SPEC CHECKSUMS:
   camera_avfoundation: 281867ff09f1da66f031a184ecfbc6f2e625c9f5
   ffmpeg_kit_flutter_new: 57e1119b327bb2e13a091e0d73576739fb9f22f5
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  flutter_tts: 91ad1884033cd95ef6e9338754adad54f01f090f
   google_mlkit_commons: 384e4e206e122b6dad430d3158205e0b2fac6789
   google_mlkit_pose_detection: 3e38d756c918444cc462692f4c745546313dea54
   GoogleDataTransport: aae35b7ea0c09004c3797d53c8c41f66f219d6a7

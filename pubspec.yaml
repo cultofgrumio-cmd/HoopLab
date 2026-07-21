@@ -49,6 +49,7 @@ dependencies:
   ultralytics_yolo: 0.1.36
   google_mlkit_pose_detection: ^0.13.0
   image: ^4.5.0
+  flutter_tts: ^4.2.0
 
 dev_dependencies:
   flutter_test:

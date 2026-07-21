@@ -32,13 +32,30 @@ flutter pub get
 flutter run
 ```
 
-Then pick **Camera** to record or **Gallery** to import a clip, trim it, and
-tap **Analyze Shot**.
+Then choose a mode:
+
+- **Live Workout** — point the camera at the hoop and every shot is scored in
+  real time (makes / misses / streak / total) with optional spoken feedback you
+  can toggle (make-or-miss call, shots-in-a-row, total).
+- **Camera** / **Gallery** — record or import a clip, trim it, and tap
+  **Analyze Shot** for the full frame-by-frame breakdown.
+
+Make/miss is decided from several independent signals (the model's `made`
+label, the ball's centre passing through the rim opening, a net-occlusion
+"swish", and rim-crossing geometry) so clean makes register even from the
+diagonal corner angle where a single geometric test fails.
+
+### Where to record from
+
+HoopLab expects **one** camera position: stand where the **half-court line
+meets a sideline** and aim the phone across the court at the rim. The camera,
+live-workout, and method screens all show a court diagram marking the spot, so
+there's no camera-angle mode to choose — just line up with the guide.
 
 ### Recording tips (for best accuracy)
 
 - Use at least ~4 seconds of footage covering release → peak → rim.
-- Keep the hoop fully in frame; a near-parallel camera angle works best.
+- Keep the rim fully in frame the whole time.
 - Good, even lighting with no heavy shadows on the ball.
 
 ## Project layout
@@ -52,14 +69,20 @@ lib/
 ├── pages/
 │   ├── method_selector.dart        # Landing screen, gallery import + trimmer
 │   ├── camera.dart                 # In-app recording
+│   ├── live_workout.dart           # Real-time live workout mode (YOLOView + audio)
 │   ├── viewer.dart                 # Analysis pipeline + results UI
 │   ├── session_history.dart        # Saved sessions + aggregate stats
 │   ├── shot_log.dart               # Per-shot breakdown for a session
 │   └── settings.dart               # Theme selection
 ├── services/
 │   ├── session_storage.dart        # Session persistence (documents dir)
-│   └── theme_storage.dart          # Theme-mode persistence
+│   ├── theme_storage.dart          # Theme-mode persistence
+│   └── audio_feedback.dart         # TTS + spoken-feedback preferences
 ├── utils/
+│   ├── shot_detector.dart          # Robust ball-approach shot segmentation
+│   ├── make_detector.dart          # Multi-method make/miss determination
+│   ├── shot_predictor.dart         # At-release make/miss prediction
+│   ├── live_shot_tracker.dart      # Streaming shot/make detector (live mode)
 │   ├── trajectory_prediction.dart  # Rim-crossing, made detection, arc prediction
 │   ├── shot_quality_evaluator.dart # Shooting-form scoring
 │   └── shooting_pose_detector.dart # ML Kit pose → shooting-motion confidence

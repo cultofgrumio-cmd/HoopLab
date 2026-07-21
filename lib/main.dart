@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 
 import 'package:hooplab/pages/method_selector.dart';
+import 'package:hooplab/services/audio_feedback.dart';
+import 'package:hooplab/services/recording_mode_storage.dart';
 import 'package:hooplab/services/theme_storage.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ThemeStorage.load();
+  await LiveFeedbackPrefs.load();
+  await RecordingModeStorage.load();
   runApp(const App());
 }
 

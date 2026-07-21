@@ -24,7 +24,27 @@
       "Read(//Users/derekli/.pub-cache/hosted/pub.dev/**)",
       "Bash(flutter analyze *)",
       "Bash(flutter test *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git ls-remote *)",
+      "Bash(sed -i '' '1045,1088d' lib/pages/viewer.dart)",
+      "Bash(sed -i '' '400,742d' lib/pages/viewer.dart)",
+      "Read(//Users/derekli/.pub-cache/**)",
+      "Bash(xargs cat)",
+      "Bash(python3 -)",
+      "Bash(flutter --version)",
+      "Bash(flutter devices *)",
+      "Bash(flutter install *)",
+      "Bash(chmod +x deploy-phone.sh)",
+      "Bash(./deploy-phone.sh *)",
+      "Bash(flutter build *)",
+      "Bash(python3 *)",
+      "Bash(git stash *)",
+      "Bash(cp -R /Users/derekli/Projects/hooplab/lib/. /Users/derekli/Projects/hooplab/.claude/worktrees/settings-features/lib/)",
+      "Bash(cp -R /Users/derekli/Projects/hooplab/test/. /Users/derekli/Projects/hooplab/.claude/worktrees/settings-features/test/)",
+      "Bash(cp /Users/derekli/Projects/hooplab/pubspec.yaml /Users/derekli/Projects/hooplab/.claude/worktrees/settings-features/pubspec.yaml)",
+      "Bash(cp /Users/derekli/Projects/hooplab/pubspec.lock /Users/derekli/Projects/hooplab/.claude/worktrees/settings-features/pubspec.lock)"
     ]
   }
 }

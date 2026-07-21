@@ -34,6 +34,8 @@ HoopLab is a mobile application (iOS + Android) that uses on-device computer vis
 
 The result is a timestamped shot-by-shot breakdown with percentage accuracy scores and actionable form feedback — without any backend or cloud dependency at runtime.
 
+**Recording setup — one prescribed angle.** HoopLab supports a single camera position: the player stands where the **half-court line meets a sideline** and aims the phone across the court at the rim. Standardising on this one diagonal corner angle (rather than offering a "backboard" vs "court/sideways" choice) lets the detection pipeline run a single tuned configuration, and lets the UI *guide* the user to the correct spot instead of asking them to pick a mode. The in-app camera, the live-workout view, and the method picker all surface a top-down court diagram (`widgets/recording_angle_guide.dart`) marking exactly where to stand.
+
 ---
 
 # 2. Architecture
@@ -94,9 +96,10 @@ Shooting motion =            Stored in Clip.frames[]
   ML Kit pose  ∪  YOLO "shoot" class
       │
       ▼
-Shot Segmentation
-  ├── _segmentShotsWithPose()   (primary — pose-gated)
-  └── _segmentShotsLegacy()     (fallback — UP/DOWN region)
+Shot Segmentation  (ShotDetector.detect — one detector, one tuned config)
+  ├── ball-approach-to-rim   (primary, corner-angle tuned)
+  ├── pose / "shoot" motion  (rescues ambiguous approaches)
+  └── motion-window fallback (when no rim is detected)
       │
       ▼
 Per-shot Analysis
@@ -228,7 +231,7 @@ own `shoot` class (`viewer.dart → analyzeVideoFrames`): a frame is marked as
 shooting motion when *either* ML Kit pose fires *or* a `shoot` detection is
 present with sufficient confidence, and `shootingConfidence` is the max of the
 two. Because the `shoot` box comes out of the same YOLO pass, this is
-essentially free and makes court-mode segmentation fire even when the skeleton
+essentially free and makes shot segmentation fire even when the skeleton
 is unclear. Fusion is strictly additive — it can only add shooting frames,
 never remove them.
 
@@ -236,23 +239,23 @@ never remove them.
 
 # 5. Shot Segmentation
 
-Two segmentation strategies are available. The system automatically selects pose-based when pose data is present, otherwise falls back to the legacy region-based approach.
+A single detector (`ShotDetector.detect`, in `utils/shot_detector.dart`) runs one configuration, tuned for the prescribed corner recording angle. Instead of relying on a rigid geometric region (which only worked front-on) or a hard pose gate (which failed when the shooter was occluded), it segments on the **ball's approach to a rim** — a robust signal for the diagonal corner view, where the ball passes *through* the rim plane rather than dropping straight onto it.
 
-## 5.1 Pose-Based Segmentation (`_segmentShotsWithPose`)
+## 5.1 Primary signal — ball approach to rim
 
-**Trigger**: A frame where `isShootingMotion == true` and `shootingConfidence > 0.6`.
+1. **Rim clustering.** Rim detections across all frames are grouped by proximity into stable rim candidates (running-averaged centre + bbox), so a spurious background rim doesn't derail detection.
+2. **Approach runs.** For each rim, the ball's per-frame distance to the rim centre is normalised by rim width. A contiguous run where that distance stays below `approachFactor × rimWidth` (≈2.4, kept slightly loose because the corner angle sends the ball through the rim plane at an angle) is "the ball at the rim". Short ball-tracking gaps are tolerated.
+3. **Shot qualification.** A run only counts as a shot if the ball actually *travelled in* — it was at least `farFactor × rimWidth` away during the lead-up (so a ball merely loitering under the rim is ignored) **or** there is shooting motion nearby.
+4. **Window.** The span is expanded by a lead (~1 s, to capture the release) and a trail (~0.75 s, to capture the arc + landing). Overlapping/very-close windows are merged (ball rattling the rim = one shot).
 
-**Window**: Frames are accumulated while the shooting motion is active. After the motion ends, 20 additional frames are captured to include the full ball arc and landing.
+**Minimum shot**: 8 frames and ≥3 ball detections. Deliberately permissive — downstream make/miss scoring sorts out the rest, rather than dropping real shots.
 
-**Minimum shot length**: 10 frames total, ≥5 ball detections. Shorter sequences are discarded as false positives.
+## 5.2 Rescue signals and fallback (fail-proof)
 
-## 5.2 Legacy Segmentation (`_segmentShotsLegacy`)
+- **Pose / `shoot` motion** rescues an approach the ball geometry is unsure about (e.g. the ball was lost mid-arc). It is a *booster*, never a hard gate, so clips with no visible shooter still segment.
+- **Motion-window fallback**: if no rim was ever detected (or geometry found nothing while there is clear shooting motion), the detector falls back to segmenting contiguous shooting-motion runs, so it never silently returns nothing. These shots are surfaced but left unscored (no rim to score against).
 
-**Trigger**: Ball enters the **UP region** — a box centered on the hoop, extending 4× hoop-width to each side and 2× hoop-height above.
-
-**Completion**: Ball enters the **DOWN region** — below the bottom edge of the hoop.
-
-This approach works well for backboard/front-facing camera angles but is less reliable for sideways (court-level) footage.
+The behaviour is covered by unit tests (`test/shot_detector_test.dart`): a clear arc, a near-horizontal pass through the rim, dribbling (no shot), ball loitering at the rim (no shot), two separated shots, a dropped-ball gap mid-arc, and both no-rim fallbacks.
 
 ---
 
@@ -268,9 +271,9 @@ After collecting all hoop detections across the shot's frames, unique hoops are 
 
 `calculateShotAccuracyFromRimCrossing()` is run against each candidate hoop. If exactly one hoop shows a **confirmed** rim crossing (confidence: `high` or `medium`), that hoop is selected. A proximity-only estimate (no confirmed crossing) does not trigger an early return — the algorithm falls through to Tier 2.
 
-*Best for*: front/backboard view where the ball's Y-coordinate clearly crosses the rim plane.
+*Best for*: shots where the ball's Y-coordinate clearly crosses the rim plane.
 
-### Tier 2 — Direction of Travel (primary sideways fix)
+### Tier 2 — Direction of Travel (primary corner-angle fix)
 
 The ball always moves **toward** the target hoop. The algorithm computes the ball's overall direction vector (first detected position → last detected position), then for each hoop candidate computes the dot product:
 
@@ -280,7 +283,7 @@ alignment = (travelDx, travelDy) · (hoopCenter - lastBallPos)
 
 The hoop with the highest positive alignment is selected. A negative alignment means the hoop is **behind** the ball's direction of travel — that hoop is skipped.
 
-*Best for*: court/sideways view where the background hoop sits on the opposite side of the frame from the target.
+*Best for*: the diagonal corner angle, where a background hoop sits away from the target hoop across the frame.
 
 ### Tier 3 — Endpoint Proximity
 
@@ -310,7 +313,7 @@ confidence = ShotConfidence.high
 reason = "made label detected by model"
 ```
 
-This is direct visual evidence — the model saw the ball inside the hoop. It is prioritized over all geometric methods, which is especially important in sideways view where the Y-axis crossing test is geometrically unreliable.
+This is direct visual evidence — the model saw the ball inside the hoop. It is prioritized over all geometric methods, which is especially important from the corner angle where the Y-axis crossing test is geometrically unreliable.
 
 ## 7.2 `calculateShotAccuracyFromRimCrossing()` — Fallback Signal
 
@@ -341,6 +344,21 @@ The 50% threshold means a shot must cross within one rim-radius of center to cou
 ## 7.4 Multi-Hoop Consistency in Rim Crossing
 
 When `calculateShotAccuracyFromRimCrossing()` runs with `frames` provided, it dynamically updates the active hoop position from per-frame detections. In multi-hoop scenes, `_getHoopFromFrame()` uses the `initialHoopPosition` as an anchor — it always returns the hoop detection **closest to the originally selected target**, preventing camera movement or frame-to-frame ordering from drifting to the background hoop mid-calculation.
+
+---
+
+# 7B. Release Prediction (`shot_predictor.dart`)
+
+Separately from the actual outcome, HoopLab predicts whether each shot will go in **at the moment of release** — so it can tell the shooter "that's going in / that's short" before the ball reaches the rim.
+
+`ShotPredictor.predictFromRelease()` uses **only the launch portion** of the trajectory (release → apex), so it never peeks at the outcome:
+
+1. **Isolate the launch.** Find the arc's apex (highest point) and walk back to where the ball began rising — that release→apex segment is the launch.
+2. **Fit a projectile model.** Least-squares fit of `x = a·t + b` (constant horizontal velocity) and `y = a·t² + b·t + c` (gravity) to the launch points.
+3. **Project and measure.** Extrapolate the parabola forward and find the closest approach of the projected path to the rim centre. `predictedAccuracy = (1 − minDist / rimRadius) × 100`; **predicted make** when that exceeds 50%.
+4. **Confidence** scales with the number of launch points, the fit residual (RMSE), and whether the fitted arc actually curves back down.
+
+The result (`predictedMake`, `predictedAccuracy`) is stored on the shot, persisted in the saved session, and surfaced three ways: an **"At release: GOING IN / OFF TARGET"** badge on the result card and video overlay, a **Pred: IN/OUT ✓/✗** chip in the shot log, and a session-level **"prediction N/M correct"** stat. This lets a shooter see when a good release rimmed out (or a bad release got lucky). Covered by `test/shot_predictor_test.dart`.
 
 ---
 
@@ -413,13 +431,15 @@ The model runs entirely on-device using the Neural Engine (iOS) or GPU delegate 
 
 **No cloud dependency at runtime.** All inference is on-device. This keeps latency low, protects user video privacy, and removes the need for any server infrastructure.
 
-**Two-signal MAKE/MISS.** The `made` label and rim-crossing geometry are complementary: the model label fires on clear makes in backboard view; direction-of-travel hoop selection + rim crossing handles ambiguous cases; the model label takes priority in court/sideways view where Y-axis geometry is unreliable.
+**Two-signal MAKE/MISS.** The `made` label and rim-crossing geometry are complementary: the model label fires on clear makes; direction-of-travel hoop selection + rim crossing handles ambiguous cases; the model label takes priority from the corner angle where Y-axis geometry is unreliable.
 
 **Direction-of-travel hoop selection.** The ball always moves toward the target hoop. Even when YOLO loses the ball mid-arc (common when it passes behind a player or the net), the overall travel direction computed from first → last detected positions reliably points to the correct hoop. This works at any camera angle.
 
 **Four-tier hoop selection with graceful degradation.** Rim crossing → direction of travel → endpoint proximity → all-frame minimum. Each tier only activates if the previous tier was inconclusive. This means the most geometrically certain method wins, but the algorithm never silently fails.
 
-**Pose-gated shot segmentation.** Using ML Kit shooting pose detection to gate which frames are included in a shot dramatically reduces false positives from incidental ball movement (dribbling, passes, ball rolling). Only frames where a human arm-raise is detected contribute to the shot window.
+**One prescribed recording angle.** Rather than asking the user to classify their footage as "backboard" or "court/sideways," HoopLab prescribes a single position (half-court/sideline corner, aimed at the rim) and guides the user to it with an on-screen court diagram. The detector then runs one configuration tuned for that angle — no mode toggle to get wrong.
+
+**Ball-approach shot segmentation, single-config and fail-proof.** The detector segments on the ball travelling from far into a rim's vicinity — robust for the corner angle, where the ball crosses the rim plane at a diagonal. Pose / `shoot` motion only *rescues* ambiguous approaches rather than gating them, and a motion-window fallback runs when no rim is detected, so the detector never silently returns nothing when a shot clearly happened. A ball loitering under the rim (which never approached from distance) is correctly rejected.
 
 **Visual/algorithmic consistency.** The hoop ring drawn on the video overlay uses the same direction-of-travel logic as the MAKE/MISS calculation. The user always sees the red ring on the same hoop that determined the score.
 
@@ -429,7 +449,7 @@ The model runs entirely on-device using the Neural Engine (iOS) or GPU delegate 
 
 - **Ball tracking gaps**: YOLO occasionally loses the ball at peak arc height or when it passes behind a player. The app handles this gracefully (direction-of-travel doesn't require continuous tracking), but very sparse trajectories fall back to proximity estimation.
 
-- **Sideways view rim crossing**: The Y-axis rim crossing test is geometrically correct only for front-facing camera angles. In court/sideways view, the ball travels horizontally through the hoop and may not produce a Y-axis crossing. This is why `made` detection is prioritized and direction-of-travel is Tier 2 in hoop selection.
+- **Corner-angle rim crossing**: The Y-axis rim crossing test is geometrically cleanest for front-facing camera angles. From the prescribed corner angle the ball crosses the rim plane diagonally and may not produce a clean Y-axis crossing. This is why `made` detection is prioritized and direction-of-travel is Tier 2 in hoop selection.
 
 - **Single-shot sessions**: The legacy segmentation works best for isolated shot attempts. Dense sequences (e.g., rapid-fire practice) may over-merge or under-segment shots.
 

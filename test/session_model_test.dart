@@ -12,6 +12,8 @@ void main() {
         accuracy: 82.5,
         formScore: 74.0,
         feedback: 'Good shot form',
+        predictedMake: true,
+        predictedAccuracy: 68.0,
         ballTrajectory: [Offset(10, 20), Offset(30, 40)],
         hoopPosition: Offset(100, 100),
       );
@@ -25,9 +27,33 @@ void main() {
       expect(decoded.accuracy, 82.5);
       expect(decoded.formScore, 74.0);
       expect(decoded.feedback, 'Good shot form');
+      expect(decoded.predictedMake, true);
+      expect(decoded.predictedAccuracy, 68.0);
+      expect(decoded.predictionCorrect, true); // predicted IN, made
       expect(decoded.ballTrajectory.length, 2);
       expect(decoded.ballTrajectory.first, const Offset(10, 20));
       expect(decoded.hoopPosition, const Offset(100, 100));
+    });
+
+    test('predictionCorrect reflects predicted-vs-actual', () {
+      const madePredictedMiss = SavedShot(
+        id: 1,
+        startTime: 0,
+        endTime: 1,
+        prediction: 'MAKE',
+        predictedMake: false,
+        ballTrajectory: [],
+      );
+      expect(madePredictedMiss.predictionCorrect, false);
+
+      const noPrediction = SavedShot(
+        id: 2,
+        startTime: 0,
+        endTime: 1,
+        prediction: 'MISS',
+        ballTrajectory: [],
+      );
+      expect(noPrediction.predictionCorrect, isNull);
     });
 
     test('tolerates legacy JSON without the new form fields', () {

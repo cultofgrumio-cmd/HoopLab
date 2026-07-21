@@ -185,18 +185,13 @@ class TrajectoryPredictor {
     required Offset hoopPosition,
     BoundingBox? hoopBBox,
     double hoopRadius = 30.0,
-    List<FrameData>? frames, // Optional: for dynamic hoop tracking
   }) {
-    // Copy list to avoid modifying original
+    // Copy list to avoid modifying original, then densify.
     final points = List<Offset>.from(ballPoints);
-
-    // Add interpolated points
     final int originalLength = points.length;
     for (int i = 1; i < originalLength; i++) {
-      Offset point1 = points[i - 1];
-      Offset point2 = points[i];
-      Offset inBetween = Offset.lerp(point1, point2, 0.5)!;
-      Offset insertPoint = Offset.lerp(point1, inBetween, 0.5)!;
+      final inBetween = Offset.lerp(points[i - 1], points[i], 0.5)!;
+      final insertPoint = Offset.lerp(points[i - 1], inBetween, 0.5)!;
       points.insert(i, insertPoint);
     }
 
@@ -208,64 +203,35 @@ class TrajectoryPredictor {
       );
     }
 
-    // Use dynamic hoop tracking if frames are provided.
-    // initialHoopPosition is used as an anchor so per-frame updates always
-    // prefer the same hoop (avoids drifting to a background hoop).
-    final initialHoopPosition = hoopPosition;
-    Offset activeHoopPosition = hoopPosition;
-    BoundingBox? activeHoopBBox = hoopBBox;
+    final rimCenterX = hoopBBox != null ? hoopBBox.centerX : hoopPosition.dx;
+    final rimWidth = hoopBBox != null ? hoopBBox.width : (hoopRadius * 2);
+    // Measure the crossing at the ring's *centre* height — where the ball
+    // actually passes through the opening. Using the rim's top edge (the old
+    // behaviour) sampled the arc too early and mis-scored genuine crossings.
+    final lineY = hoopPosition.dy;
 
-    if (frames != null && frames.isNotEmpty) {
-      debugPrint(
-        '🎯 Using dynamic hoop tracking across ${frames.length} frames',
-      );
-    }
-
-    final rimHeight = hoopBBox != null
-        ? hoopBBox.y1
-        : hoopPosition.dy - (hoopRadius * 0.5);
-
-    Offset? pointAboveRim;
-    Offset? pointBelowRim;
-    int? crossingFrameIndex;
-
-    for (int i = points.length - 1; i >= 0; i--) {
-      // Update hoop position for this frame if using dynamic tracking.
-      // Pass initialHoopPosition as reference so that in multi-hoop scenes
-      // we always track the originally-selected hoop, not a background one.
-      if (frames != null && i < frames.length) {
-        final frameHoop = _getHoopFromFrame(
-          frames[i],
-          referencePosition: initialHoopPosition,
-        );
-        if (frameHoop != null) {
-          activeHoopPosition = frameHoop;
-          final frameHoopBBox = _getHoopBBoxFromFrame(
-            frames[i],
-            referencePosition: initialHoopPosition,
-          );
-          if (frameHoopBBox != null) {
-            activeHoopBBox = frameHoopBBox;
-          }
-        }
-      }
-
-      final currentRimHeight = activeHoopBBox != null
-          ? activeHoopBBox.y1
-          : activeHoopPosition.dy - (hoopRadius * 0.5);
-
-      if (points[i].dy < currentRimHeight && pointAboveRim == null) {
-        pointAboveRim = points[i];
-        crossingFrameIndex = i;
-        if (i + 1 < points.length) {
-          pointBelowRim = points[i + 1];
-        }
-        break;
+    // Scan every segment for a crossing of the rim centre line and keep the one
+    // whose interpolated X is nearest the rim centre — that's the segment where
+    // the ball went through the opening (robust to noise and multiple grazes).
+    double? crossX;
+    for (int i = 1; i < points.length; i++) {
+      final a = points[i - 1];
+      final b = points[i];
+      final dy = b.dy - a.dy;
+      if (dy.abs() < 1e-6) continue; // horizontal segment — no clean crossing
+      final straddles =
+          (a.dy <= lineY && b.dy >= lineY) || (a.dy >= lineY && b.dy <= lineY);
+      if (!straddles) continue;
+      final t = (lineY - a.dy) / dy;
+      final x = a.dx + (b.dx - a.dx) * t;
+      if (crossX == null ||
+          (x - rimCenterX).abs() < (crossX - rimCenterX).abs()) {
+        crossX = x;
       }
     }
 
-    if (pointAboveRim == null || pointBelowRim == null) {
-      // Try fallback: use closest approach to rim if no crossing detected
+    if (crossX == null) {
+      // No rim-plane crossing (partial arc) — estimate from closest approach.
       return _estimateAccuracyFromProximity(
         points: points,
         hoopPosition: hoopPosition,
@@ -274,28 +240,7 @@ class TrajectoryPredictor {
       );
     }
 
-    final x1 = pointAboveRim.dx;
-    final y1 = pointAboveRim.dy;
-    final x2 = pointBelowRim.dx;
-    final y2 = pointBelowRim.dy;
-
-    final predictedX = x1 + (x2 - x1) * (rimHeight - y1) / (y2 - y1);
-
-    // Calculate accuracy based on distance from center
-    // Use the active hoop position at the crossing frame
-    final rimCenterX = activeHoopBBox != null
-        ? activeHoopBBox.centerX
-        : activeHoopPosition.dx;
-    final distanceFromCenter = (predictedX - rimCenterX).abs();
-    final rimWidth = activeHoopBBox != null
-        ? activeHoopBBox.width
-        : (hoopRadius * 2);
-
-    if (frames != null) {
-      debugPrint(
-        '📍 Rim crossing at frame $crossingFrameIndex - hoop at (${activeHoopPosition.dx.toStringAsFixed(1)}, ${activeHoopPosition.dy.toStringAsFixed(1)})',
-      );
-    }
+    final distanceFromCenter = (crossX - rimCenterX).abs();
 
     // Perfect center = 100%, edge = ~0%, outside = negative (clamped to 0)
     final accuracy = ((1 - (distanceFromCenter / (rimWidth / 2))) * 100).clamp(
@@ -304,7 +249,7 @@ class TrajectoryPredictor {
     );
 
     // Determine confidence based on trajectory completeness
-    final hasFullArc = _hasCompleteArc(points, rimHeight);
+    final hasFullArc = _hasCompleteArc(points, lineY);
     final confidence = hasFullArc ? ShotConfidence.high : ShotConfidence.medium;
 
     debugPrint(
@@ -432,61 +377,6 @@ class TrajectoryPredictor {
       }
     }
     return null;
-  }
-
-  /// Get hoop position from a single frame.
-  /// When [referencePosition] is provided and multiple hoops are detected,
-  /// returns the one closest to [referencePosition] to avoid drifting to a
-  /// background hoop.
-  static Offset? _getHoopFromFrame(
-    FrameData frame, {
-    Offset? referencePosition,
-  }) {
-    final hoopDetections = frame.detections.where((d) => d.isRim).toList();
-
-    if (hoopDetections.isEmpty) return null;
-    if (referencePosition == null || hoopDetections.length == 1) {
-      return hoopDetections.first.center;
-    }
-
-    // Multiple hoops — return the one closest to the reference (target) hoop
-    Detection? closest;
-    double minDist = double.infinity;
-    for (final hoop in hoopDetections) {
-      final dist = (hoop.center - referencePosition).distance;
-      if (dist < minDist) {
-        minDist = dist;
-        closest = hoop;
-      }
-    }
-    return closest?.center;
-  }
-
-  /// Get hoop bounding box from a single frame.
-  /// When [referencePosition] is provided and multiple hoops are detected,
-  /// returns the bbox of the one closest to [referencePosition].
-  static BoundingBox? _getHoopBBoxFromFrame(
-    FrameData frame, {
-    Offset? referencePosition,
-  }) {
-    final hoopDetections = frame.detections.where((d) => d.isRim).toList();
-
-    if (hoopDetections.isEmpty) return null;
-    if (referencePosition == null || hoopDetections.length == 1) {
-      return hoopDetections.first.bbox;
-    }
-
-    // Multiple hoops — return the bbox of the one closest to the reference hoop
-    Detection? closest;
-    double minDist = double.infinity;
-    for (final hoop in hoopDetections) {
-      final dist = (hoop.center - referencePosition).distance;
-      if (dist < minDist) {
-        minDist = dist;
-        closest = hoop;
-      }
-    }
-    return closest?.bbox;
   }
 
   /// Perform linear regression for either X or Y coordinates

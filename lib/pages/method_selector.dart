@@ -1,10 +1,14 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hooplab/models/recording_mode.dart';
 import 'package:hooplab/pages/camera.dart';
+import 'package:hooplab/pages/live_workout.dart';
 import 'package:hooplab/pages/session_history.dart';
 import 'package:hooplab/pages/settings.dart';
 import 'package:hooplab/pages/viewer.dart' as viewer;
+import 'package:hooplab/services/recording_mode_storage.dart';
+import 'package:hooplab/widgets/recording_angle_guide.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pro_image_editor/pro_image_editor.dart';
@@ -62,6 +66,14 @@ class _MethodSelectorState extends State<MethodSelector>
     } finally {
       _setLoading(false);
     }
+  }
+
+  Future<void> _handleLivePress() async {
+    if (_isLoading) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const LiveWorkoutPage()),
+    );
   }
 
   // Handle gallery selection with proper error handling
@@ -267,6 +279,40 @@ class _MethodSelectorState extends State<MethodSelector>
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 24),
+                  // Where to record from — the single supported camera angle.
+                  Card(
+                    elevation: 1,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.videocam_outlined,
+                                color: colorScheme.primary,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Where to Record From',
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  color: colorScheme.primary,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          const RecordingAngleGuide(),
+                          const SizedBox(height: 12),
+                          _buildModeBanner(context),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
                   // Recording Tips Card
                   Card(
                     elevation: 1,
@@ -305,17 +351,29 @@ class _MethodSelectorState extends State<MethodSelector>
                             'Good lighting - avoid shadows on ball',
                           ),
                           const SizedBox(height: 6),
-                          _buildTip('🎯', 'Keep hoop fully visible in frame'),
+                          _buildTip('🎯', 'Keep the rim fully visible in frame'),
                           const SizedBox(height: 6),
                           _buildTip(
-                            '📏',
-                            'Best results when hoop is almost parallel to camera',
+                            '📐',
+                            'Film from the half-court / sideline corner, '
+                                'phone aimed across the court at the rim',
                           ),
                         ],
                       ),
                     ),
                   ),
                   const SizedBox(height: 32),
+
+                  // Headline: real-time live workout mode.
+                  _MethodButton(
+                    title: 'Live Workout',
+                    subtitle: 'Real-time shots + spoken feedback',
+                    icon: Icons.sports_basketball_rounded,
+                    onPressed: _isLoading ? null : _handleLivePress,
+                    color: Colors.deepOrange,
+                    isLoading: _isLoading,
+                  ),
+                  const SizedBox(height: _buttonSpacing),
 
                   // Responsive layout
                   LayoutBuilder(
@@ -360,6 +418,61 @@ class _MethodSelectorState extends State<MethodSelector>
           ),
         ),
       ),
+    );
+  }
+
+  /// Shows the active camera rig (tripod vs on-the-ground) with its setup tip,
+  /// tappable to change it. Analysis is tuned to whichever is selected here.
+  Widget _buildModeBanner(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return ValueListenableBuilder<RecordingMode>(
+      valueListenable: recordingModeNotifier,
+      builder: (context, mode, _) {
+        return InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const SettingsPage()),
+          ),
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: scheme.primary.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: scheme.primary.withValues(alpha: 0.2)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.tune, size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: RichText(
+                    text: TextSpan(
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurface.withValues(alpha: 0.75),
+                        height: 1.3,
+                      ),
+                      children: [
+                        TextSpan(
+                          text: '${mode.label} · ',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: scheme.primary,
+                          ),
+                        ),
+                        TextSpan(text: mode.setupTip),
+                      ],
+                    ),
+                  ),
+                ),
+                Icon(Icons.chevron_right,
+                    size: 18,
+                    color: scheme.onSurface.withValues(alpha: 0.4)),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
