@@ -3,9 +3,15 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hooplab/models/clip.dart';
+import 'package:hooplab/models/recording_mode.dart';
 import 'package:hooplab/models/session.dart';
+import 'package:hooplab/services/recording_mode_storage.dart';
 import 'package:hooplab/services/session_storage.dart';
+import 'package:hooplab/utils/make_detector.dart';
+import 'package:hooplab/utils/shot_detector.dart';
+import 'package:hooplab/utils/shot_predictor.dart';
 import 'package:hooplab/utils/shot_quality_evaluator.dart';
+import 'package:hooplab/utils/shooting_form_analyzer.dart';
 import 'package:hooplab/widgets/clean_video_player.dart';
 import 'package:hooplab/widgets/trajectory_overlay.dart';
 import 'package:hooplab/utils/trajectory_prediction.dart';
@@ -53,9 +59,8 @@ class _ViewerPageState extends State<ViewerPage> {
   // frames so pose detection stays on the same person after the ball leaves.
   Rect? _shooterBbox;
 
-  // Detection mode settings
-  bool useCourtMode =
-      false; // false = backboard mode, true = court/sideways mode
+  // Detection settings. There is one prescribed recording angle (half-court /
+  // sideline corner, camera aimed at the rim), so there is no mode to choose.
   bool showPoseSkeleton = false; // Toggle to show pose bones
 
   // Video handled by CleanVideoPlayer
@@ -295,28 +300,57 @@ class _ViewerPageState extends State<ViewerPage> {
   void _segmentShots() {
     if (clip.frames.isEmpty) return;
 
-    // User explicitly chose court mode - force pose-based detection
-    if (useCourtMode) {
-      final hasPoseData = clip.frames.any((f) => f.isShootingMotion);
-      if (hasPoseData) {
-        debugPrint('🏀 Starting POSE-BASED shot segmentation (Court Mode)...');
-        _segmentShotsWithPose();
-      } else {
-        debugPrint('⚠️ Court mode selected but no shooting motion detected!');
-        debugPrint(
-          '📊 Pose detection may need adjustment or video has no visible person shooting',
-        );
-        // Still try legacy as fallback
-        _segmentShotsLegacy();
+    // The detector (and every downstream scorer) is tuned to the camera rig the
+    // user selected in Settings — tripod (level, true geometry) vs on-the-ground
+    // (tilted up, foreshortened vertical). It segments on the ball's approach to
+    // a rim, uses pose / "shoot" motion only to rescue ambiguous shots, and
+    // falls back to motion windows so it never silently detects nothing.
+    final mode = recordingModeNotifier.value;
+    debugPrint('🏀 Detecting shots (${mode.storageKey} rig)...');
+    final windows = ShotDetector.detect(
+      clip.frames,
+      config: ShotDetectorConfig.forMode(mode),
+    );
+
+    final shots = <Shot>[];
+    for (final w in windows) {
+      final shotFrames = clip.frames.sublist(w.startIndex, w.endIndex + 1);
+
+      // Refine the target hoop per shot (direction-of-travel handles multi-hoop
+      // scenes), falling back to the rim the detector locked onto.
+      final targetHoop = _findTargetHoop(shotFrames) ?? w.hoop;
+
+      final ballPositions = <Offset>[];
+      for (final f in shotFrames) {
+        final b = f.detections.where((d) => d.isBall).firstOrNull;
+        if (b != null) ballPositions.add(b.center);
       }
-      return;
+
+      final shot = Shot(
+        id: shots.length,
+        frames: shotFrames,
+        startTime: shotFrames.first.timestamp,
+        endTime: shotFrames.last.timestamp,
+        hoopPosition: targetHoop,
+      );
+
+      // Score only when we have a hoop and enough of an arc; otherwise the shot
+      // is still surfaced (unscored) rather than dropped.
+      if (targetHoop != null && ballPositions.length >= 3) {
+        final hoopBBox =
+            _computeHoopBBoxForTarget(shotFrames, targetHoop) ?? w.hoopBBox;
+        _scoreShot(shot, ballPositions, targetHoop, hoopBBox, mode);
+      }
+
+      shots.add(shot);
     }
 
-    // Backboard mode - use legacy detection
-    debugPrint(
-      '🏀 Starting shot segmentation with up/down regions (Backboard Mode)...',
-    );
-    _segmentShotsLegacy();
+    setState(() {
+      clip.shots = shots;
+      currentShotIndex = shots.isNotEmpty ? 0 : -1;
+    });
+
+    debugPrint('🏀 Shot detection complete: ${shots.length} shot(s)');
   }
 
   /// Score a segmented shot: MAKE/MISS + accuracy from the model's "made"
@@ -328,388 +362,104 @@ class _ViewerPageState extends State<ViewerPage> {
     List<Offset> ballPositions,
     Offset targetHoop,
     BoundingBox? hoopBBox,
+    RecordingMode mode,
   ) {
     final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
 
-    // Geometry-based accuracy with dynamic per-frame hoop tracking.
-    final rimResult = TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
-      ballPoints: ballPositions,
-      hoopPosition: targetHoop,
-      hoopBBox: hoopBBox,
-      hoopRadius: hoopRadius,
+    // Make/miss from several independent signals (made label, ball through the
+    // rim opening, net-occlusion swish, rim crossing) so clean makes register
+    // even when the Y-axis crossing geometry can't see them. This is the same
+    // detection used live and is intentionally camera-independent — a make is a
+    // make regardless of the rig — so no per-mode config is applied here.
+    final finalResult = MakeDetector.detect(
       frames: shot.frames,
+      ballPoints: ballPositions,
+      rimCenter: targetHoop,
+      rimBBox: hoopBBox,
+      rimRadius: hoopRadius,
     );
 
-    // The model's "made" label is direct visual evidence — it overrides the
-    // geometry when present (crucial for sideways/court angles).
-    final madeResult = TrajectoryPredictor.checkMadeDetection(
-      shot.frames,
-      targetHoop,
-    );
-    final finalResult = madeResult ?? rimResult;
-
-    // Shooting-form quality, independent of whether the shot went in.
+    // Shooting-form quality, independent of whether the shot went in. The arc /
+    // release-angle bands are shifted for the ground rig, whose upward tilt
+    // makes every arc read flatter on screen.
     final quality = ShotQualityEvaluator.evaluateShotQuality(
       ballTrajectory: ballPositions,
       hoopPosition: targetHoop,
       hoopRadius: hoopRadius,
+      profile: ShotArcProfile.forMode(mode),
     );
 
+    // Body mechanics (arm angles + knee bend) from the shooter's pose track.
+    // Measured in 3D so the same posture reads consistently regardless of where
+    // on the court the shooter stands relative to the camera.
+    final shooterPoses = <Pose>[];
+    for (final f in shot.frames) {
+      final p = f.poses;
+      if (p != null && p.isNotEmpty) shooterPoses.add(p.first);
+    }
+    final form = ShootingFormAnalyzer.analyze(shooterPoses);
+
     shot.accuracy = finalResult.accuracy;
-    final verdict = finalResult.accuracy > 50.0 ? 'MAKE' : 'MISS';
-    final hasForm = quality.overallScore > 0;
-    shot.formScore = hasForm ? quality.overallScore : null;
-    shot.feedback = hasForm ? quality.feedback : null;
-    shot.prediction = hasForm ? '$verdict • ${quality.feedback}' : verdict;
+    final verdict = finalResult.made ? 'MAKE' : 'MISS';
+    debugPrint('🏀 Shot ${shot.id}: $verdict via ${finalResult.method} '
+        '(${finalResult.accuracy.toStringAsFixed(0)}%)');
+    if (form.hasData) {
+      debugPrint('🧍 Form: set=${form.setElbowAngle?.round()}° '
+          'release=${form.releaseElbowAngle?.round()}° '
+          'knee=${form.kneeBendAngle?.round()}° '
+          'depth=${form.usedDepth} score=${form.postureScore?.round()}');
+    }
+
+    // Lead with body-mechanics cues (arm/knees — what the shooter can actually
+    // change), then the ball-flight cues.
+    final cues = <String>[...form.cues, ...quality.cues];
+
+    // Blend the flight-quality score with the posture score when we have both.
+    final hasFlight = quality.overallScore > 0;
+    double? combinedScore;
+    if (hasFlight && form.postureScore != null) {
+      combinedScore = quality.overallScore * 0.5 + form.postureScore! * 0.5;
+    } else if (hasFlight) {
+      combinedScore = quality.overallScore;
+    } else if (form.postureScore != null) {
+      combinedScore = form.postureScore;
+    }
+
+    final feedbackText = cues.isNotEmpty ? cues.join(' • ') : null;
+    shot.formScore = combinedScore;
+    shot.feedback = feedbackText;
+    shot.prediction =
+        feedbackText != null ? '$verdict • $feedbackText' : verdict;
+
+    // Release-time prediction: from the launch arc only (before the outcome is
+    // visible), so we can tell the shooter "that's going in / that's short" the
+    // instant the ball leaves the hand.
+    final ballTimes = <double>[];
+    final ballPts = <Offset>[];
+    for (final f in shot.frames) {
+      final b = f.detections.where((d) => d.isBall).firstOrNull;
+      if (b != null) {
+        ballPts.add(b.center);
+        ballTimes.add(f.timestamp);
+      }
+    }
+    final prediction = ShotPredictor.predictFromRelease(
+      ballPoints: ballPts,
+      timestamps: ballTimes,
+      rimCenter: targetHoop,
+      rimRadius: hoopRadius,
+      config: ShotPredictorConfig.forMode(mode),
+    );
+    if (prediction.isKnown) {
+      shot.predictedMake = prediction.willMake;
+      shot.predictedAccuracy = prediction.accuracy;
+    }
 
     if (finalResult.confidence != ShotConfidence.high) {
       debugPrint(
-        '⚠️ Shot ${shot.id} ${finalResult.confidence} confidence: ${finalResult.reason}',
+        '⚠️ Shot ${shot.id} ${finalResult.confidence} confidence (${finalResult.method})',
       );
     }
-  }
-
-  /// Legacy shot segmentation using ball trajectory only
-  void _segmentShotsLegacy() {
-    final shots = <Shot>[];
-    List<FrameData> currentShotFrames = [];
-    List<Offset> currentShotBallPositions = [];
-
-    bool inUpRegion = false;
-    bool inDownRegion = false;
-    int upFrameIndex = 0;
-    int downFrameIndex = 0;
-
-    int consecutiveNoBallFrames = 0;
-
-    // Find hoop position
-    Offset? hoopPosition = _findHoopPosition();
-
-    if (hoopPosition == null) {
-      debugPrint('❌ No hoop detected, cannot segment shots');
-      return;
-    }
-
-    // Compute average hoop bbox so region thresholds scale with actual video
-    final hoopBBox = _getAverageHoopBBox(0, clip.frames.length - 1, null);
-    debugPrint(
-      '📐 Hoop bbox for region detection: ${hoopBBox?.width.toStringAsFixed(1) ?? "default"}w '
-      'x ${hoopBBox?.height.toStringAsFixed(1) ?? "default"}h',
-    );
-
-    for (int i = 0; i < clip.frames.length; i++) {
-      final frame = clip.frames[i];
-      final ballDetections = frame.detections
-          .where((d) => d.isBall)
-          .toList();
-
-      if (ballDetections.isNotEmpty) {
-        final ball = ballDetections.first;
-        final ballPos = Offset(ball.bbox.centerX, ball.bbox.centerY);
-
-        consecutiveNoBallFrames = 0;
-
-        // Check if ball enters "UP" region (around backboard, above hoop)
-        if (!inUpRegion &&
-            _isInUpRegion(ballPos, hoopPosition, ball.bbox, hoopBox: hoopBBox)) {
-          inUpRegion = true;
-          upFrameIndex = i;
-          // Start a fresh shot window. Previously ball positions accumulated
-          // from before the shot, polluting the trajectory used for scoring.
-          currentShotFrames = [];
-          currentShotBallPositions = [];
-          debugPrint('🏀 Ball in UP region at frame $i (${frame.timestamp}s)');
-        }
-
-        // While inside the shot window, accumulate this frame + ball position.
-        if (inUpRegion && !inDownRegion) {
-          currentShotFrames.add(frame);
-          currentShotBallPositions.add(ballPos);
-        }
-
-        // Check if ball enters "DOWN" region (below the net)
-        if (inUpRegion &&
-            !inDownRegion &&
-            _isInDownRegion(ballPos, hoopPosition, ball.bbox, hoopBox: hoopBBox)) {
-          inDownRegion = true;
-          downFrameIndex = i;
-          debugPrint(
-            '🏀 Ball in DOWN region at frame $i (${frame.timestamp}s)',
-          );
-        }
-
-        // Shot complete: went from UP → DOWN
-        if (inUpRegion && inDownRegion && upFrameIndex < downFrameIndex) {
-          if (currentShotFrames.length >= 10 &&
-              currentShotBallPositions.length >= 3) {
-            // Select the hoop the ball was actually aimed at (handles
-            // multi-hoop scenes where a background hoop was detected first).
-            final targetHoop =
-                _findTargetHoop(currentShotFrames) ?? hoopPosition;
-
-            final shot = Shot(
-              id: shots.length,
-              frames: List.from(currentShotFrames),
-              startTime: currentShotFrames.first.timestamp,
-              endTime: currentShotFrames.last.timestamp,
-              hoopPosition: targetHoop,
-            );
-
-            final hoopBBox = _getAverageHoopBBox(
-              upFrameIndex,
-              downFrameIndex,
-              null,
-              targetHoopPosition: targetHoop,
-            );
-            _scoreShot(shot, currentShotBallPositions, targetHoop, hoopBBox);
-
-            shots.add(shot);
-            debugPrint(
-              '✅ Shot ${shot.id} completed: Accuracy=${shot.accuracy?.toStringAsFixed(1) ?? "N/A"}% '
-              '(${currentShotFrames.length} frames)',
-            );
-          }
-
-          // Reset for next shot
-          inUpRegion = false;
-          inDownRegion = false;
-          currentShotFrames = [];
-          currentShotBallPositions = [];
-        }
-      } else {
-        consecutiveNoBallFrames++;
-
-        // Reset if no ball detected for too long
-        if (consecutiveNoBallFrames > 15) {
-          inUpRegion = false;
-          inDownRegion = false;
-          currentShotFrames = [];
-          currentShotBallPositions = [];
-        }
-      }
-    }
-
-    setState(() {
-      clip.shots = shots;
-      currentShotIndex = shots.isNotEmpty ? 0 : -1;
-    });
-
-    debugPrint(
-      '🏀 Legacy shot segmentation complete: ${shots.length} shots detected',
-    );
-  }
-
-  /// Enhanced shot segmentation using pose detection data
-  /// Only tracks ball trajectory when someone is in shooting motion
-  void _segmentShotsWithPose() {
-    final shots = <Shot>[];
-    List<FrameData> currentShotFrames = [];
-    List<Offset> currentShotBallPositions = [];
-
-    bool inShootingMotion = false;
-    int shootingStartFrame = 0;
-    int consecutiveNonShootingFrames = 0;
-
-    // Find hoop position
-    Offset? hoopPosition = _findHoopPosition();
-
-    if (hoopPosition == null) {
-      debugPrint('❌ No hoop detected, cannot segment shots');
-      return;
-    }
-
-    for (int i = 0; i < clip.frames.length; i++) {
-      final frame = clip.frames[i];
-
-      // Check if someone is in shooting motion
-      if (frame.isShootingMotion && frame.shootingConfidence > 0.6) {
-        consecutiveNonShootingFrames = 0;
-
-        // Start tracking a new shot
-        if (!inShootingMotion) {
-          inShootingMotion = true;
-          shootingStartFrame = i;
-          currentShotFrames = [];
-          currentShotBallPositions = [];
-          debugPrint(
-            '🏃 Shooting motion started at frame $i (${frame.timestamp}s)',
-          );
-        }
-
-        // Add frame to current shot
-        currentShotFrames.add(frame);
-
-        // Track ball position during shooting motion
-        final ballDetections = frame.detections
-            .where((d) => d.isBall)
-            .toList();
-
-        if (ballDetections.isNotEmpty) {
-          final ball = ballDetections.first;
-          final ballPos = Offset(ball.bbox.centerX, ball.bbox.centerY);
-          currentShotBallPositions.add(ballPos);
-        }
-      } else {
-        // Not in shooting motion
-        if (inShootingMotion) {
-          consecutiveNonShootingFrames++;
-
-          // Keep adding frames for a bit after shooting motion ends
-          // (to capture the full arc and landing)
-          if (consecutiveNonShootingFrames <= 20) {
-            currentShotFrames.add(frame);
-
-            // Continue tracking ball
-            final ballDetections = frame.detections
-                .where((d) => d.isBall)
-                .toList();
-
-            if (ballDetections.isNotEmpty) {
-              final ball = ballDetections.first;
-              final ballPos = Offset(ball.bbox.centerX, ball.bbox.centerY);
-              currentShotBallPositions.add(ballPos);
-            }
-          } else {
-            // Shooting motion ended, save the shot
-            if (currentShotFrames.length >= 10 &&
-                currentShotBallPositions.length >= 5) {
-              // Find target hoop based on ball proximity during this shot
-              final targetHoop =
-                  _findTargetHoop(currentShotFrames) ?? hoopPosition;
-
-              final shot = Shot(
-                id: shots.length,
-                frames: List.from(currentShotFrames),
-                startTime: currentShotFrames.first.timestamp,
-                endTime: currentShotFrames.last.timestamp,
-                hoopPosition: targetHoop,
-              );
-
-              // Score using the specific hoop this shot was aimed at (not the
-              // global first-found hoop).
-              final hoopBBox = _getAverageHoopBBox(
-                shootingStartFrame,
-                i - 1,
-                null,
-                targetHoopPosition: targetHoop,
-              );
-              _scoreShot(
-                shot,
-                currentShotBallPositions,
-                targetHoop,
-                hoopBBox,
-              );
-
-              shots.add(shot);
-              debugPrint(
-                '✅ Pose-based shot ${shot.id} completed: '
-                'Accuracy=${shot.accuracy?.toStringAsFixed(1) ?? "N/A"}% '
-                '(${currentShotFrames.length} frames, ${currentShotBallPositions.length} ball positions)',
-              );
-            } else {
-              debugPrint(
-                '⚠️ Discarded short shot: ${currentShotFrames.length} frames, '
-                '${currentShotBallPositions.length} ball positions',
-              );
-            }
-
-            // Reset for next shot
-            inShootingMotion = false;
-            currentShotFrames = [];
-            currentShotBallPositions = [];
-            consecutiveNonShootingFrames = 0;
-          }
-        }
-      }
-    }
-
-    // Handle last shot if still in progress
-    if (inShootingMotion && currentShotFrames.length >= 10) {
-      final lastTargetHoop =
-          _findTargetHoop(currentShotFrames) ?? hoopPosition;
-
-      final shot = Shot(
-        id: shots.length,
-        frames: List.from(currentShotFrames),
-        startTime: currentShotFrames.first.timestamp,
-        endTime: currentShotFrames.last.timestamp,
-        hoopPosition: lastTargetHoop,
-      );
-
-      if (currentShotBallPositions.length >= 5) {
-        final hoopBBox = _getAverageHoopBBox(
-          shootingStartFrame,
-          clip.frames.length - 1,
-          null,
-          targetHoopPosition: lastTargetHoop,
-        );
-        _scoreShot(shot, currentShotBallPositions, lastTargetHoop, hoopBBox);
-      }
-
-      shots.add(shot);
-    }
-
-    setState(() {
-      clip.shots = shots;
-      currentShotIndex = shots.isNotEmpty ? 0 : -1;
-    });
-
-    debugPrint(
-      '🏀 Pose-based shot segmentation complete: ${shots.length} shots detected',
-    );
-  }
-
-  /// Check if ball is in the "UP" region (around backboard, above hoop)
-  bool _isInUpRegion(
-    Offset ballPos,
-    Offset hoopPos,
-    BoundingBox ballBox, {
-    BoundingBox? hoopBox,
-  }) {
-    // Define UP region boundaries based on reference implementation
-    // X: 4x hoop width on each side
-    // Y: 2x hoop height above, to 0.5x below hoop center
-    final hoopWidth = hoopBox?.width ?? 60.0;
-    final hoopHeight = hoopBox?.height ?? 30.0;
-
-    final x1 = hoopPos.dx - (4 * hoopWidth);
-    final x2 = hoopPos.dx + (4 * hoopWidth);
-    final y1 = hoopPos.dy - (2 * hoopHeight);
-    final y2 = hoopPos.dy - (0.5 * hoopHeight);
-
-    return ballPos.dx > x1 &&
-        ballPos.dx < x2 &&
-        ballPos.dy > y1 &&
-        ballPos.dy < y2;
-  }
-
-  /// Check if ball is in the "DOWN" region (below the net)
-  bool _isInDownRegion(
-    Offset ballPos,
-    Offset hoopPos,
-    BoundingBox ballBox, {
-    BoundingBox? hoopBox,
-  }) {
-    // Define DOWN region: below the bottom of the hoop
-    final hoopHeight = hoopBox?.height ?? 30.0;
-    final downThreshold = hoopPos.dy + (0.5 * hoopHeight);
-
-    return ballPos.dy > downThreshold;
-  }
-
-  /// Find hoop position (legacy - just returns first hoop found)
-  Offset? _findHoopPosition() {
-    for (final frame in clip.frames) {
-      final hoopDetections = frame.detections
-          .where((d) => d.isRim)
-          .toList();
-
-      if (hoopDetections.isNotEmpty) {
-        final hoop = hoopDetections.first;
-        return Offset(hoop.bbox.centerX, hoop.bbox.centerY);
-      }
-    }
-    return null;
   }
 
   /// Find the target hoop based on which hoop the ball gets closest to
@@ -819,8 +569,8 @@ class _ViewerPageState extends State<ViewerPage> {
       }
 
       // Only trust the rim-crossing result if it was a confirmed crossing.
-      // A proximity estimate (no confirmed crossing) is unreliable in
-      // sideways/court view — fall through to direction-of-travel instead.
+      // A proximity estimate (no confirmed crossing) is unreliable from the
+      // diagonal corner angle — fall through to direction-of-travel instead.
       if (bestHoop != null && bestHasRimCrossing) {
         debugPrint(
           '✅ Target hoop selected by rim crossing: '
@@ -1014,50 +764,6 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   /// Get average hoop bounding box for a frame range
-  BoundingBox? _getAverageHoopBBox(
-    int startFrame,
-    int endFrame,
-    Map<int, Offset>? hoopMap, {
-    Offset? targetHoopPosition,
-  }) {
-    double sumX1 = 0, sumY1 = 0, sumX2 = 0, sumY2 = 0;
-    int count = 0;
-
-    final end = endFrame < clip.frames.length
-        ? endFrame
-        : clip.frames.length - 1;
-
-    for (int i = startFrame; i <= end; i++) {
-      final frame = clip.frames[i];
-      final hoopDetections = frame.detections.where((d) => d.isRim);
-
-      for (final hoop in hoopDetections) {
-        // When a target hoop is known, skip detections that belong to other
-        // hoops (i.e. background hoops more than 100px away).
-        if (targetHoopPosition != null) {
-          final center = Offset(hoop.bbox.centerX, hoop.bbox.centerY);
-          if ((center - targetHoopPosition).distance > 100) continue;
-        }
-        sumX1 += hoop.bbox.x1;
-        sumY1 += hoop.bbox.y1;
-        sumX2 += hoop.bbox.x2;
-        sumY2 += hoop.bbox.y2;
-        count++;
-      }
-    }
-
-    if (count > 0) {
-      return BoundingBox(
-        x1: sumX1 / count,
-        y1: sumY1 / count,
-        x2: sumX2 / count,
-        y2: sumY2 / count,
-      );
-    }
-
-    return null;
-  }
-
   /// Check if current shot has ended and auto-advance to next shot
   void _checkShotAutoAdvance(Duration position) {
     if (clip.shots.isEmpty ||
@@ -1343,6 +1049,8 @@ class _ViewerPageState extends State<ViewerPage> {
       accuracy: shot.accuracy,
       formScore: shot.formScore,
       feedback: shot.feedback,
+      predictedMake: shot.predictedMake,
+      predictedAccuracy: shot.predictedAccuracy,
       ballTrajectory: shot.ballTrajectory,
       hoopPosition: shot.hoopPosition,
     );
@@ -1615,8 +1323,8 @@ class _ViewerPageState extends State<ViewerPage> {
 
         // The model has a dedicated "shoot" class — a direct, essentially-free
         // shooting signal (it comes out of the same YOLO pass). Fuse it with
-        // ML Kit pose so court-mode segmentation still fires when the skeleton
-        // is unclear. This can only ever ADD shooting frames, never remove them.
+        // ML Kit pose so shot segmentation still fires when the skeleton is
+        // unclear. This can only ever ADD shooting frames, never remove them.
         double shootConfidence = 0.0;
         for (final d in frameDetections) {
           if (d.isShoot && d.confidence > shootConfidence) {
@@ -1663,12 +1371,14 @@ class _ViewerPageState extends State<ViewerPage> {
   Widget _buildVideoPlayerWithOverlay() {
     // Determine which frames to show in overlay
     List<FrameData> overlayFrames = [];
+    Shot? currentShot;
 
     if (clip.shots.isNotEmpty &&
         currentShotIndex >= 0 &&
         currentShotIndex < clip.shots.length) {
       // Show only current shot's trajectory
-      overlayFrames = clip.shots[currentShotIndex].frames;
+      currentShot = clip.shots[currentShotIndex];
+      overlayFrames = currentShot.frames;
     } else if (clip.frames.isNotEmpty) {
       // Fallback to all frames if no shots segmented
       overlayFrames = clip.frames;
@@ -1700,7 +1410,8 @@ class _ViewerPageState extends State<ViewerPage> {
                   _videoPlayerKey.currentState?.videoSize ??
                   const Size(1920, 1080),
               showPoseSkeleton: showPoseSkeleton,
-              isCourtMode: useCourtMode,
+              predictedMake: currentShot?.predictedMake,
+              predictedAccuracy: currentShot?.predictedAccuracy,
             )
           : null,
     );
@@ -1738,17 +1449,23 @@ class _ViewerPageState extends State<ViewerPage> {
         children: [
           Column(
             children: [
-              // Video player section (takes most of the screen)
-              Expanded(
-                child: Container(
+              // Video player — fixed height so it's always clearly visible
+              // and never gets crushed by the controls below.
+              SizedBox(
+                width: double.infinity,
+                height: (MediaQuery.of(context).size.height * 0.42)
+                    .clamp(220.0, 480.0),
+                child: ColoredBox(
                   color: Colors.black,
-                  child: Center(child: _buildVideoPlayerWithOverlay()),
+                  child: _buildVideoPlayerWithOverlay(),
                 ),
               ),
 
-              // Control panel
-              Container(
-                padding: const EdgeInsets.all(16),
+              // Control panel — scrolls so it never overflows the screen.
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: Theme.of(context).colorScheme.surface,
                   borderRadius: const BorderRadius.only(
@@ -1759,95 +1476,55 @@ class _ViewerPageState extends State<ViewerPage> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Detection mode selector (only show before analysis)
+                    // Camera-rig reminder (only before analysis). Analysis is
+                    // tuned to the rig selected in Settings, so show which one
+                    // is active and how to set it up.
                     if (!isAnalyzing && clip.frames.isEmpty) ...[
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        margin: const EdgeInsets.only(bottom: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: Colors.blue.withValues(alpha: 0.3),
+                      ValueListenableBuilder<RecordingMode>(
+                        valueListenable: recordingModeNotifier,
+                        builder: (context, mode, _) => Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(bottom: 12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.blue.withValues(alpha: 0.3),
+                            ),
                           ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Detection Mode',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            RadioGroup<bool>(
-                              groupValue: useCourtMode,
-                              onChanged: (value) {
-                                if (value == null) return;
-                                setState(() => useCourtMode = value);
-                              },
-                              child: const Row(
-                                children: [
-                                  Expanded(
-                                    child: RadioListTile<bool>(
-                                      dense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                      title: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            '🏀 Backboard View',
-                                            style: TextStyle(
-                                              fontSize: 13,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                          Text(
-                                            'Backboard visible',
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: Colors.grey,
-                                            ),
-                                          ),
-                                        ],
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.videocam_outlined,
+                                  color: Colors.blue, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Analyzing for: ${mode.label}',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
                                       ),
-                                      value: false,
                                     ),
-                                  ),
-                                  Expanded(
-                                    child: RadioListTile<bool>(
-                                      dense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                      title: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            '🏃 Court/Sideways',
-                                            style: TextStyle(
-                                              fontSize: 13,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                          Text(
-                                            'Uses pose detection',
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: Colors.grey,
-                                            ),
-                                          ),
-                                        ],
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      mode.setupTip,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onSurface
+                                            .withValues(alpha: 0.7),
                                       ),
-                                      value: true,
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -2178,80 +1855,18 @@ class _ViewerPageState extends State<ViewerPage> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
-                      // Analysis summary with pose detection info
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.green.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: Colors.green.withValues(alpha: 0.3),
-                          ),
-                        ),
-                        child: Column(
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  Icons.check_circle,
-                                  color: Colors.green[700],
-                                  size: 20,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  '${clip.frames.length} frames analyzed',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onSurface,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '$totalDetections ball/hoop detections',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.grey[600],
-                              ),
-                            ),
-                            if (shootingFramesDetected > 0) ...[
-                              const SizedBox(height: 4),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.accessibility_new,
-                                    color: Colors.green[700],
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    '$shootingFramesDetected frames with shooting motion detected',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.green[700],
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ] else ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                'No shooting motion detected (using legacy detection)',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.orange[700],
-                                ),
-                              ),
-                            ],
-                          ],
+                      const SizedBox(height: 10),
+                      // Compact one-line analysis footnote.
+                      Text(
+                        '${clip.frames.length} frames · $totalDetections detections'
+                        '${shootingFramesDetected > 0 ? " · $shootingFramesDetected shooting" : ""}',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurface
+                              .withValues(alpha: 0.5),
                         ),
                       ),
                     ],
@@ -2260,12 +1875,6 @@ class _ViewerPageState extends State<ViewerPage> {
 
                     // Video position and controls
                     if (clip.frames.isNotEmpty) ...[
-                      Text(
-                        'Video position: ${_currentVideoPosition.inSeconds}s',
-                        style: const TextStyle(color: Colors.grey),
-                      ),
-                      const SizedBox(height: 8),
-
                       // Video seek slider
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -2281,14 +1890,14 @@ class _ViewerPageState extends State<ViewerPage> {
                                         (_videoPlayerKey
                                                 .currentState
                                                 ?.duration
-                                                .inMilliseconds)!
+                                                .inMilliseconds ?? 0)
                                             .toDouble(),
                                       ),
                               max:
                                   (_videoPlayerKey
                                           .currentState
                                           ?.duration
-                                          .inMilliseconds)!
+                                          .inMilliseconds ?? 0)
                                       .toDouble(),
                               onChanged: (value) {
                                 final newPosition = Duration(
@@ -2434,6 +2043,8 @@ class _ViewerPageState extends State<ViewerPage> {
                     ],
                   ],
                 ),
+                  ),
+                ),
               ),
             ],
           ),
@@ -2514,6 +2125,12 @@ class _ShotResultCard extends StatelessWidget {
       ),
       child: Column(
         children: [
+          // At-release prediction, shown first — it's what we knew the moment
+          // the ball left the shooter's hands.
+          if (shot.predictedMake != null) ...[
+            _predictionBadge(shot.predictedMake!, shot.predictedAccuracy),
+            const SizedBox(height: 12),
+          ],
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -2551,6 +2168,18 @@ class _ShotResultCard extends StatelessWidget {
               color: Colors.grey[600],
             ),
           ),
+          if (shot.predictedMake != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              _agreementText(shot.predictedMake!, isMake),
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                color: Colors.grey[700],
+              ),
+            ),
+          ],
           if (shot.formScore != null) ...[
             const SizedBox(height: 10),
             const Divider(height: 1),
@@ -2570,16 +2199,107 @@ class _ShotResultCard extends StatelessWidget {
               ],
             ),
             if (shot.feedback != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                shot.feedback!,
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 12, color: Colors.grey[700]),
-              ),
+              const SizedBox(height: 8),
+              _FormCues(feedback: shot.feedback!),
             ],
           ],
         ],
       ),
+    );
+  }
+
+  Widget _predictionBadge(bool predictedMake, double? predictedAccuracy) {
+    final color = predictedMake ? Colors.green : Colors.orange;
+    final pct = predictedAccuracy != null
+        ? ' · ${predictedAccuracy.round()}%'
+        : '';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.my_location, size: 14, color: color),
+          const SizedBox(width: 6),
+          Text(
+            'At release: ${predictedMake ? "GOING IN" : "OFF TARGET"}$pct',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A short note on whether the release prediction matched the outcome.
+  String _agreementText(bool predictedMake, bool made) {
+    if (predictedMake == made) {
+      return made
+          ? 'Predicted make — clean release'
+          : 'Predicted miss — release was off';
+    }
+    return predictedMake
+        ? 'Good release — rimmed out'
+        : 'Got the bounce — release looked off';
+  }
+}
+
+/// Renders the ` • `-joined form feedback as a left-aligned bulleted list so
+/// longer, specific coaching cues stay readable.
+class _FormCues extends StatelessWidget {
+  final String feedback;
+  const _FormCues({required this.feedback});
+
+  @override
+  Widget build(BuildContext context) {
+    final cues = feedback
+        .split(' • ')
+        .map((c) => c.trim())
+        .where((c) => c.isNotEmpty)
+        .toList();
+    if (cues.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final cue in cues)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 5, right: 6),
+                  child: Container(
+                    width: 4,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[500],
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    cue,
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.3,
+                      color: Colors.grey[800],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
@@ -2606,23 +2326,53 @@ class _SessionSummary extends StatelessWidget {
                 ? Colors.orange
                 : Colors.red;
 
+    // Release-prediction accuracy across the session (predicted vs actual).
+    final graded = shots
+        .where((s) => s.predictedMake != null && s.accuracy != null)
+        .toList();
+    final correct = graded
+        .where((s) => s.predictedMake == s.isMake)
+        .length;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: cs.primaryContainer.withValues(alpha: 0.4),
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
+      child: Column(
         children: [
-          _SummaryStat(label: 'Shots', value: '$total'),
-          _SummaryStat(label: 'Makes', value: '$makes', color: Colors.green),
-          _SummaryStat(label: 'Misses', value: '$misses', color: Colors.red),
-          _SummaryStat(
-            label: 'Make %',
-            value: '${pct.toStringAsFixed(0)}%',
-            color: pctColor,
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _SummaryStat(label: 'Shots', value: '$total'),
+              _SummaryStat(label: 'Makes', value: '$makes', color: Colors.green),
+              _SummaryStat(label: 'Misses', value: '$misses', color: Colors.red),
+              _SummaryStat(
+                label: 'Make %',
+                value: '${pct.toStringAsFixed(0)}%',
+                color: pctColor,
+              ),
+            ],
           ),
+          if (graded.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.my_location, size: 13, color: cs.primary),
+                const SizedBox(width: 6),
+                Text(
+                  'Release prediction: $correct/${graded.length} correct'
+                  ' (${(correct / graded.length * 100).toStringAsFixed(0)}%)',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface.withValues(alpha: 0.75),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );

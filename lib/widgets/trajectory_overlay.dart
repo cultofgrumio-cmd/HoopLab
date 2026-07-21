@@ -8,7 +8,8 @@ class TrajectoryOverlay extends StatelessWidget {
   final Duration currentVideoPosition;
   final Size videoSize;
   final bool showPoseSkeleton;
-  final bool isCourtMode;
+  final bool? predictedMake;
+  final double? predictedAccuracy;
 
   const TrajectoryOverlay({
     super.key,
@@ -16,7 +17,8 @@ class TrajectoryOverlay extends StatelessWidget {
     required this.currentVideoPosition,
     required this.videoSize,
     this.showPoseSkeleton = false,
-    this.isCourtMode = false,
+    this.predictedMake,
+    this.predictedAccuracy,
   });
 
   @override
@@ -29,7 +31,8 @@ class TrajectoryOverlay extends StatelessWidget {
             frames: frames,
             currentVideoPosition: currentVideoPosition,
             videoSize: videoSize,
-            isCourtMode: isCourtMode,
+            predictedMake: predictedMake,
+            predictedAccuracy: predictedAccuracy,
           ),
           size: Size.infinite,
         ),
@@ -52,13 +55,15 @@ class TrajectoryPainter extends CustomPainter {
   final List<FrameData> frames;
   final Duration currentVideoPosition;
   final Size videoSize;
-  final bool isCourtMode; // Court/sideways view vs backboard view
+  final bool? predictedMake; // Release-time prediction for this shot
+  final double? predictedAccuracy;
 
   TrajectoryPainter({
     required this.frames,
     required this.currentVideoPosition,
     required this.videoSize,
-    this.isCourtMode = false,
+    this.predictedMake,
+    this.predictedAccuracy,
   });
 
   @override
@@ -147,6 +152,55 @@ class TrajectoryPainter extends CustomPainter {
         offsetY,
       );
     }
+
+    // Draw the at-release prediction badge on top (once the ball is airborne).
+    _drawReleasePredictionBadge(canvas, size);
+  }
+
+  /// Top-centre badge stating the release-time prediction for this shot.
+  void _drawReleasePredictionBadge(Canvas canvas, Size size) {
+    final make = predictedMake;
+    if (make == null) return;
+
+    final color = make ? Colors.green : Colors.orange;
+    final pct = predictedAccuracy != null
+        ? ' · ${predictedAccuracy!.round()}%'
+        : '';
+    final label = 'PREDICTED: ${make ? "GOING IN" : "OFF TARGET"}$pct';
+
+    final tp = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 14,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const padH = 12.0;
+    const padV = 6.0;
+    final rectWidth = tp.width + padH * 2;
+    final rectHeight = tp.height + padV * 2;
+    final left = (size.width - rectWidth) / 2;
+    const top = 12.0;
+
+    final bg = RRect.fromRectAndRadius(
+      Rect.fromLTWH(left, top, rectWidth, rectHeight),
+      const Radius.circular(16),
+    );
+    canvas.drawRRect(bg, Paint()..color = color.withValues(alpha: 0.85));
+    canvas.drawRRect(
+      bg,
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.85)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+    tp.paint(canvas, Offset(left + padH, top + padV));
   }
 
   /// Clean trajectory data by removing outliers and smoothing
@@ -331,8 +385,8 @@ class TrajectoryPainter extends CustomPainter {
   /// is heading toward. Uses the ball's overall direction of travel (first→last
   /// ball position across ALL frames) so the result is stable during playback.
   ///
-  /// In court/sideways view the background hoop sits at the opposite side from
-  /// the target — the direction vector from the ball's final position to the
+  /// From the diagonal corner angle a background hoop sits away from the
+  /// target — the direction vector from the ball's final position to the
   /// target hoop is positive (aligned with travel), while the background hoop
   /// is behind or perpendicular (negative / near-zero alignment).
   Detection? _getTargetHoopDetection(List<Detection> hoopDetections) {
@@ -505,22 +559,12 @@ class TrajectoryPainter extends CustomPainter {
     const horizontalThreshold = 30.0; // pixels
     const verticalThreshold = 50.0; // pixels
 
-    // Horizontal feedback (only for backboard mode, not court/sideways)
+    // Horizontal feedback. From the prescribed diagonal corner angle, in-frame
+    // left/right is confounded with depth (toward/away from the camera), so we
+    // report distance off-centre rather than a misleading LEFT/RIGHT cue.
     if (horizontalDiff.abs() > horizontalThreshold) {
-      if (isCourtMode) {
-        // Court/sideways view - don't give left/right directions
-        horizontalFeedback =
-            '🎯 ${(horizontalDiff.abs() / 10).round() * 10}px off center';
-      } else {
-        // Backboard view - left/right makes sense
-        if (horizontalDiff > 0) {
-          horizontalFeedback =
-              'Aim ${(horizontalDiff / 10).round() * 10}px LEFT';
-        } else {
-          horizontalFeedback =
-              'Aim ${(horizontalDiff.abs() / 10).round() * 10}px RIGHT';
-        }
-      }
+      horizontalFeedback =
+          '🎯 ${(horizontalDiff.abs() / 10).round() * 10}px off center';
     }
 
     // Vertical feedback (arc height)
@@ -630,7 +674,9 @@ class TrajectoryPainter extends CustomPainter {
   @override
   bool shouldRepaint(TrajectoryPainter oldDelegate) {
     return currentVideoPosition != oldDelegate.currentVideoPosition ||
-        frames != oldDelegate.frames;
+        frames != oldDelegate.frames ||
+        predictedMake != oldDelegate.predictedMake ||
+        predictedAccuracy != oldDelegate.predictedAccuracy;
   }
 }
 

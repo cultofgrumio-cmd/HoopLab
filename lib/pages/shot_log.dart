@@ -277,7 +277,10 @@ class _ShotCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       if (shot.prediction != null)
                         Container(
@@ -295,15 +298,18 @@ class _ShotCard extends StatelessWidget {
                             ),
                           ),
                         ),
-                      if (shot.accuracy != null) ...[
-                        const SizedBox(width: 8),
+                      if (shot.predictedMake != null)
+                        _PredictedChip(
+                          predictedMake: shot.predictedMake!,
+                          correct: shot.predictionCorrect,
+                        ),
+                      if (shot.accuracy != null)
                         Text(
                           '${shot.accuracy!.toStringAsFixed(1)}% accuracy',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: colorScheme.onSurface.withValues(alpha: 0.7),
                           ),
                         ),
-                      ],
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -351,6 +357,51 @@ class _ShotCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Compact chip showing the release-time prediction and, when the outcome is
+/// known, whether that prediction turned out correct.
+class _PredictedChip extends StatelessWidget {
+  final bool predictedMake;
+  final bool? correct;
+
+  const _PredictedChip({required this.predictedMake, this.correct});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = predictedMake ? Colors.green : Colors.orange;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.my_location, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            'Pred: ${predictedMake ? 'IN' : 'OUT'}',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+          if (correct != null) ...[
+            const SizedBox(width: 4),
+            Icon(
+              correct! ? Icons.check_circle : Icons.cancel,
+              size: 11,
+              color: correct! ? Colors.green : Colors.red.shade400,
+            ),
+          ],
+        ],
       ),
     );
   }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:hooplab/pages/viewer.dart';
+import 'package:hooplab/widgets/recording_angle_guide.dart';
 
 class CameraPage extends StatefulWidget {
   const CameraPage({super.key});
@@ -94,9 +95,52 @@ class _CameraPageState extends State<CameraPage> {
     }
 
     return Scaffold(
+      backgroundColor: Colors.black,
       body: Stack(
         children: [
           Center(child: CameraPreview(_controller!)),
+
+          // Positioning guide — the single supported recording angle. Shown
+          // before recording, hidden once the user is rolling so it doesn't
+          // block the framing.
+          if (!_isRecording)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Text(
+                          'Set up your shot',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
+                          ),
+                        ),
+                        SizedBox(height: 10),
+                        SizedBox(
+                          width: 200,
+                          child: RecordingAngleGuide(onDark: true),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
           Positioned(
             bottom: 30,
             left: 0,

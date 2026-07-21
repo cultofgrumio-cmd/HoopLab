@@ -75,8 +75,10 @@ class ShootingPoseDetector {
         }
       }
 
-      // Consider it a shooting motion if confidence > 0.6
-      final isCurrentlyShooting = maxShootingConfidence > 0.6;
+      // Consider it a shooting motion above this confidence. Kept moderate so a
+      // clearly raised/extended arm counts even when only one side of the body
+      // is visible (common in sideways/court footage).
+      final isCurrentlyShooting = maxShootingConfidence > 0.5;
 
       // Track shooting state transitions
       if (isCurrentlyShooting && !_isInShootingMotion) {
@@ -179,82 +181,68 @@ class ShootingPoseDetector {
     return null;
   }
 
-  /// Analyze a pose to determine if it's a basketball shooting motion
-  /// Returns confidence score 0.0-1.0
+  /// Analyze a pose to determine if it's a basketball shooting motion.
+  /// Returns confidence score 0.0-1.0.
+  ///
+  /// Scored per-arm and takes the best side, so a shot is still detected when
+  /// only one side of the body is visible (sideways/court footage frequently
+  /// occludes the far arm). A both-arms "set shot" adds a small bonus.
   double _analyzeShootingMotion(Pose pose) {
     final landmarks = pose.landmarks;
 
-    // Get key landmarks for shooting detection
-    final rightShoulder = landmarks[PoseLandmarkType.rightShoulder];
-    final rightElbow = landmarks[PoseLandmarkType.rightElbow];
+    double sideScore(
+      PoseLandmarkType shoulderType,
+      PoseLandmarkType elbowType,
+      PoseLandmarkType wristType,
+    ) {
+      final shoulder = landmarks[shoulderType];
+      final wrist = landmarks[wristType];
+      // Shoulder + wrist are the minimum needed to judge a raised arm.
+      if (shoulder == null || wrist == null) return 0.0;
+
+      double c = 0.0;
+      // Core cue: wrist above the shoulder (arm raised to shoot).
+      if (wrist.y < shoulder.y) c += 0.45;
+      // Arm meaningfully extended upward.
+      if ((shoulder.y - wrist.y) > 40) c += 0.30;
+      // Elbow angle in the shooting range (arm extending overhead).
+      final elbow = landmarks[elbowType];
+      if (elbow != null) {
+        final angle = _calculateAngle(shoulder, elbow, wrist);
+        if (angle >= 80 && angle <= 170) c += 0.25;
+      }
+      return c;
+    }
+
+    double best = sideScore(
+      PoseLandmarkType.rightShoulder,
+      PoseLandmarkType.rightElbow,
+      PoseLandmarkType.rightWrist,
+    );
+    final leftScore = sideScore(
+      PoseLandmarkType.leftShoulder,
+      PoseLandmarkType.leftElbow,
+      PoseLandmarkType.leftWrist,
+    );
+    if (leftScore > best) best = leftScore;
+
+    // Both-arms "set shot" bonus: both wrists raised and close together.
     final rightWrist = landmarks[PoseLandmarkType.rightWrist];
-    final leftShoulder = landmarks[PoseLandmarkType.leftShoulder];
-    final leftElbow = landmarks[PoseLandmarkType.leftElbow];
     final leftWrist = landmarks[PoseLandmarkType.leftWrist];
-
-    // Need at least shoulder and wrist points
-    if (rightShoulder == null ||
-        rightWrist == null ||
-        leftShoulder == null ||
-        leftWrist == null) {
-      return 0.0;
-    }
-
-    double confidence = 0.0;
-
-    // Check 1: At least one arm is raised above shoulder (0.3 points)
-    final rightArmRaised = rightWrist.y < rightShoulder.y;
-    final leftArmRaised = leftWrist.y < leftShoulder.y;
-
-    if (rightArmRaised || leftArmRaised) {
-      confidence += 0.3;
-    }
-
-    // Check 2: Shooting arm is significantly extended upward (0.3 points)
-    if (rightElbow != null) {
-      final rightArmExtension = rightShoulder.y - rightWrist.y;
-      if (rightArmExtension > 50) {
-        // More than 50 pixels above shoulder
-        confidence += 0.3;
+    final rightShoulder = landmarks[PoseLandmarkType.rightShoulder];
+    final leftShoulder = landmarks[PoseLandmarkType.leftShoulder];
+    if (rightWrist != null &&
+        leftWrist != null &&
+        rightShoulder != null &&
+        leftShoulder != null) {
+      final bothRaised =
+          rightWrist.y < rightShoulder.y && leftWrist.y < leftShoulder.y;
+      if (bothRaised && (rightWrist.x - leftWrist.x).abs() < 160) {
+        best += 0.15;
       }
     }
 
-    if (leftElbow != null) {
-      final leftArmExtension = leftShoulder.y - leftWrist.y;
-      if (leftArmExtension > 50) {
-        confidence += 0.3;
-      }
-    }
-
-    // Check 3: Arm angle is in shooting position (0.2 points)
-    if (rightElbow != null) {
-      final elbowAngle = _calculateAngle(rightShoulder, rightElbow, rightWrist);
-
-      // Typical shooting angle is 90-160 degrees (arm extended upward)
-      if (elbowAngle >= 90 && elbowAngle <= 160) {
-        confidence += 0.2;
-      }
-    }
-
-    if (leftElbow != null) {
-      final elbowAngle = _calculateAngle(leftShoulder, leftElbow, leftWrist);
-
-      if (elbowAngle >= 90 && elbowAngle <= 160) {
-        confidence += 0.2;
-      }
-    }
-
-    // Check 4: Both arms are engaged (guide hand + shooting hand) (0.2 points)
-    if (rightArmRaised && leftArmRaised) {
-      // Both wrists should be relatively close together (in front of face)
-      final wristDistance = (rightWrist.x - leftWrist.x).abs();
-      if (wristDistance < 150) {
-        // Wrists within 150 pixels
-        confidence += 0.2;
-      }
-    }
-
-    return confidence.clamp(0.0, 1.0);
+    return best.clamp(0.0, 1.0);
   }
 
   /// Calculate angle between three points (in degrees)
