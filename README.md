@@ -1,56 +1,84 @@
-# HoopLab set up
+# HoopLab
 
-## Setup Instructions
+On-device basketball shot analysis. Record or import a video and HoopLab
+automatically detects each shot, tracks the ball through its arc, decides
+**MAKE** or **MISS**, and scores your shooting form — all on the phone, with
+no server or network required.
 
-### 1. Start the Python Server
+## How it works
 
-1. Navigate to the Python directory:
-   ```bash
-   cd python
-   ```
+Everything runs locally on the device:
 
-3. Run the server:
-   ```bash
-   python server2.py
-   ```
+1. **Trim** the clip (gallery imports pass through a trimmer first).
+2. **Extract frames** with FFmpeg at the video's native frame rate.
+3. **Detect** the ball, rim, players, and shot events on every frame with an
+   on-device YOLO model (`assets/best_float16.tflite`).
+4. **Detect shooting motion** by fusing two signals: Google ML Kit pose
+   detection on the shooter and the model's own `shoot` class.
+5. **Segment shots**, pick the target hoop, and score each shot from the
+   `made` label / rim-crossing geometry plus a shooting-form evaluation.
+6. **Review**: a trajectory overlay is drawn over playback, and sessions can be
+   saved to a local history with make/miss stats.
 
-if that doesn't work, use python3
+See [`docs/hooplab_technical_overview.md`](docs/hooplab_technical_overview.md)
+for the full pipeline and algorithm details.
 
-The server will start on `http://0.0.0.0:8080`
+## Running it
 
-### 2. Configure the Flutter App
+No backend, no configuration. From the project root:
 
-1. Find your computer's IP address:
-   - **Windows**: Open Command Prompt, type `ipconfig`, look for "IPv4 Address"
-   - **Mac**: Open Terminal, type `ifconfig`, look for "inet" under your network interface
-   - **Linux**: Open Terminal, type `hostname -I`
+```bash
+flutter pub get
+flutter run
+```
 
-2. Update the server IP in the Flutter app:
-   - Open `lib/viewer.dart` (or wherever your main code is)
-   - Find this line:
-     ```dart
-     var endpoint = "http://192.168.1.10:8080/extract_frames/";
-     ```
-   - Replace `192.168.1.10` with your computer's IP address
+Then pick **Camera** to record or **Gallery** to import a clip, trim it, and
+tap **Analyze Shot**.
 
-### 3. Run the Flutter App
+### Recording tips (for best accuracy)
 
-1. Connect your device or start an emulator
-2. Run the app:
-   ```bash
-   flutter run
-   ```
+- Use at least ~4 seconds of footage covering release → peak → rim.
+- Keep the hoop fully in frame; a near-parallel camera angle works best.
+- Good, even lighting with no heavy shadows on the ball.
 
-## Usage
+## Project layout
 
-1. The app will load a video file
-2. Tap "Start Analysis" to begin processing
-3. The server extracts frames and sends them back to the app
-4. The app runs YOLO detection on each frame
-5. View detected objects overlaid on the video
+```
+lib/
+├── main.dart                       # App entry point + Material theme
+├── models/
+│   ├── clip.dart                   # Clip, FrameData, Detection, BoundingBox, Shot + label helpers
+│   └── session.dart                # Saved sessions and shots (persisted to JSON)
+├── pages/
+│   ├── method_selector.dart        # Landing screen, gallery import + trimmer
+│   ├── camera.dart                 # In-app recording
+│   ├── viewer.dart                 # Analysis pipeline + results UI
+│   ├── session_history.dart        # Saved sessions + aggregate stats
+│   ├── shot_log.dart               # Per-shot breakdown for a session
+│   └── settings.dart               # Theme selection
+├── services/
+│   ├── session_storage.dart        # Session persistence (documents dir)
+│   └── theme_storage.dart          # Theme-mode persistence
+├── utils/
+│   ├── trajectory_prediction.dart  # Rim-crossing, made detection, arc prediction
+│   ├── shot_quality_evaluator.dart # Shooting-form scoring
+│   └── shooting_pose_detector.dart # ML Kit pose → shooting-motion confidence
+└── widgets/
+    ├── clean_video_player.dart     # Video player wrapper (Chewie)
+    └── trajectory_overlay.dart     # Trajectory + pose-skeleton painters
+```
 
-## Troubleshooting
+## Model
 
-- **Connection Error**: Make sure both your phone and computer are on the same WiFi network
-- **Server Not Found**: Double-check the IP address in the Flutter code matches your computer's IP
-- **Port Already in Use**: If port 8080 is busy, change it in `server2.py` and update the Flutter code accordingly
+`assets/best_float16.tflite` — YOLO11n (FP16), classes:
+`0=ball, 1=made, 2=person, 3=rim, 4=shoot`. Runs on the device's Neural
+Engine / GPU delegate.
+
+## Tests
+
+```bash
+flutter test
+```
+
+Covers the scoring math (rim crossing, made detection), shot-form evaluation,
+label matching, and session persistence.

@@ -16,7 +16,15 @@
       "Bash(where lualatex:*)",
       "Bash(pandoc hooplab_technical_overview.md -o hooplab_technical_overview.pdf --pdf-engine=xelatex --toc --toc-depth=2 -V mainfont=\"Segoe UI\" -V monofont=\"Consolas\")",
       "Bash(miktex-update --admin)",
-      "Bash(miktex --version)"
+      "Bash(miktex --version)",
+      "Bash(flutter pub *)",
+      "Bash(rm -rf ios/Pods ios/Podfile.lock)",
+      "Bash(pod install *)",
+      "Bash(grep -rn \"class PoseLandmark\\\\|PoseLandmark\\(\\\\|factory PoseLandmark\" ~/.pub-cache/hosted/pub.dev/google_mlkit_pose_detection-*/lib/ 2>/dev/null | head -10)",
+      "Read(//Users/derekli/.pub-cache/hosted/pub.dev/**)",
+      "Bash(flutter analyze *)",
+      "Bash(flutter test *)",
+      "Bash(git add *)"
     ]
   }
 }

@@ -82,7 +82,7 @@ class TrajectoryPainter extends CustomPainter {
       if (frame.timestamp * 1000 > currentTimeMs) break;
 
       final ballDetections = frame.detections
-          .where((d) => d.label.toLowerCase().contains('ball'))
+          .where((d) => d.isBall)
           .toList();
 
       if (ballDetections.isNotEmpty) {
@@ -216,7 +216,7 @@ class TrajectoryPainter extends CustomPainter {
       if (frame.timestamp * 1000 > currentTimeMs) break;
 
       final ballDetections = frame.detections
-          .where((d) => d.label.toLowerCase().contains('ball'))
+          .where((d) => d.isBall)
           .toList();
 
       if (ballDetections.isNotEmpty) {
@@ -325,10 +325,7 @@ class TrajectoryPainter extends CustomPainter {
   }
 
   /// Returns true if [d] is a hoop/rim/basket detection.
-  bool _isHoopDetection(Detection d) =>
-      d.label.toLowerCase().contains('hoop') ||
-      d.label.toLowerCase().contains('rim') ||
-      d.label.toLowerCase().contains('basket');
+  bool _isHoopDetection(Detection d) => d.isRim;
 
   /// From a list of hoop detections in a single frame, pick the one the ball
   /// is heading toward. Uses the ball's overall direction of travel (first→last
@@ -346,7 +343,7 @@ class TrajectoryPainter extends CustomPainter {
     Offset? firstBall, lastBall;
     for (final frame in frames) {
       final ball =
-          frame.detections.where((d) => d.label.toLowerCase().contains('ball')).firstOrNull;
+          frame.detections.where((d) => d.isBall).firstOrNull;
       if (ball != null) {
         firstBall ??= Offset(ball.bbox.centerX, ball.bbox.centerY);
         lastBall = Offset(ball.bbox.centerX, ball.bbox.centerY);
@@ -746,11 +743,11 @@ class PoseSkeletonOverlay extends CustomPainter {
         // Color based on confidence
         final avgConfidence = (point1.likelihood + point2.likelihood) / 2;
         if (avgConfidence > 0.7) {
-          bonePaint.color = Colors.greenAccent.withOpacity(0.8);
+          bonePaint.color = Colors.greenAccent.withValues(alpha: 0.8);
         } else if (avgConfidence > 0.5) {
-          bonePaint.color = Colors.yellowAccent.withOpacity(0.8);
+          bonePaint.color = Colors.yellowAccent.withValues(alpha: 0.8);
         } else {
-          bonePaint.color = Colors.redAccent.withOpacity(0.5);
+          bonePaint.color = Colors.redAccent.withValues(alpha: 0.5);
         }
 
         canvas.drawLine(start, end, bonePaint);
@@ -773,20 +770,20 @@ class PoseSkeletonOverlay extends CustomPainter {
       } else if (landmark.likelihood > 0.5) {
         jointPaint.color = Colors.yellowAccent;
       } else {
-        jointPaint.color = Colors.redAccent.withOpacity(0.5);
+        jointPaint.color = Colors.redAccent.withValues(alpha: 0.5);
       }
 
       // Draw circle for joint
-      canvas.drawCircle(point, 5.0, jointPaint);
+      canvas.drawCircle(point, 3.0, jointPaint);
 
       // Draw white border
       canvas.drawCircle(
         point,
-        5.0,
+        3.0,
         Paint()
           ..color = Colors.white
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.0,
+          ..strokeWidth = 1.2,
       );
     }
   }
@@ -801,7 +798,7 @@ class PoseSkeletonOverlay extends CustomPainter {
           fontSize: 20,
           fontWeight: FontWeight.bold,
           shadows: [
-            Shadow(color: Colors.black.withOpacity(0.8), blurRadius: 4),
+            Shadow(color: Colors.black.withValues(alpha: 0.8), blurRadius: 4),
           ],
         ),
       ),

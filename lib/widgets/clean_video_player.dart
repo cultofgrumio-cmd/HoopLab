@@ -23,9 +23,11 @@ class CleanVideoPlayer extends StatefulWidget {
 }
 
 class CleanVideoPlayerState extends State<CleanVideoPlayer> {
-  late VideoPlayerController _controller;
-  late ChewieController _chewieController;
+  VideoPlayerController? _controller;
+  ChewieController? _chewieController;
+  VoidCallback? _positionListener;
   bool _isInitialized = false;
+  bool _disposed = false;
   double _aspectRatio = 16 / 9; // Default aspect ratio
 
   @override
@@ -35,63 +37,67 @@ class CleanVideoPlayerState extends State<CleanVideoPlayer> {
   }
 
   void _initializeVideoPlayer() async {
-    _controller = VideoPlayerController.file(File(widget.videoPath));
-    await _controller.initialize();
+    final controller = VideoPlayerController.file(File(widget.videoPath));
+    _controller = controller;
+    await controller.initialize();
+    // The widget may have been disposed while initialize() was in flight.
+    if (_disposed || !mounted) return;
 
     // Get actual video dimensions for aspect ratio BEFORE creating ChewieController
-    if (_controller.value.size != Size.zero) {
+    if (controller.value.size != Size.zero) {
       _aspectRatio =
-          _controller.value.size.width / _controller.value.size.height;
+          controller.value.size.width / controller.value.size.height;
     }
 
-    _chewieController = ChewieController(
-      videoPlayerController: _controller,
+    final chewie = ChewieController(
+      videoPlayerController: controller,
       autoPlay: true,
       looping: true,
       aspectRatio: _aspectRatio,
     );
+    _chewieController = chewie;
 
-    if (mounted) {
-      setState(() {
-        _isInitialized = true;
-      });
+    setState(() {
+      _isInitialized = true;
+    });
 
-      widget.onVideoReady?.call();
+    widget.onVideoReady?.call();
 
-      // Listen to position changes (throttled to avoid performance issues)
-      Duration? lastReportedPosition;
-      _controller.addListener(() {
-        if (mounted) {
-          final currentPos = _controller.value.position;
-          // Only report if position changed by at least 100ms
-          if (lastReportedPosition == null ||
-              (currentPos - lastReportedPosition!).inMilliseconds.abs() >=
-                  100) {
-            lastReportedPosition = currentPos;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) {
-                widget.onPositionChanged?.call(currentPos);
-              }
-            });
-          }
-        }
-      });
-    }
+    // Listen to position changes (throttled to avoid performance issues)
+    Duration? lastReportedPosition;
+    _positionListener = () {
+      if (_disposed || !mounted) return;
+      final currentPos = controller.value.position;
+      // Only report if position changed by at least 100ms
+      if (lastReportedPosition == null ||
+          (currentPos - lastReportedPosition!).inMilliseconds.abs() >= 100) {
+        lastReportedPosition = currentPos;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_disposed || !mounted) return;
+          widget.onPositionChanged?.call(currentPos);
+        });
+      }
+    };
+    controller.addListener(_positionListener!);
   }
 
   @override
   void dispose() {
-    _controller.dispose();
-    _chewieController.dispose();
+    _disposed = true;
+    if (_positionListener != null) {
+      _controller?.removeListener(_positionListener!);
+    }
+    _chewieController?.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   /// Seek to specific position
   Future<void> seekTo(Duration position) async {
-    if (!_isInitialized) return;
+    if (!_isInitialized || _disposed) return;
 
     try {
-      await _chewieController.seekTo(position);
+      await _chewieController?.seekTo(position);
       // Force a frame update after seek
       if (mounted) {
         setState(() {});
@@ -103,10 +109,10 @@ class CleanVideoPlayerState extends State<CleanVideoPlayer> {
 
   /// Play the video
   Future<void> play() async {
-    if (!_isInitialized) return;
+    if (!_isInitialized || _disposed) return;
 
     try {
-      await _chewieController.play();
+      await _chewieController?.play();
       if (mounted) {
         setState(() {});
       }
@@ -117,10 +123,10 @@ class CleanVideoPlayerState extends State<CleanVideoPlayer> {
 
   /// Pause the video
   Future<void> pause() async {
-    if (!_isInitialized) return;
+    if (!_isInitialized || _disposed) return;
 
     try {
-      await _chewieController.pause();
+      await _chewieController?.pause();
       if (mounted) {
         setState(() {});
       }
@@ -131,27 +137,29 @@ class CleanVideoPlayerState extends State<CleanVideoPlayer> {
 
   /// Get current position
   Duration get currentPosition {
-    return _controller.value.position;
+    return _controller?.value.position ?? Duration.zero;
   }
 
   /// Get video duration
   Duration get duration {
-    return _controller.value.duration;
+    return _controller?.value.duration ?? Duration.zero;
   }
 
   /// Get video size
   Size get videoSize {
-    return _controller.value.size;
+    return _controller?.value.size ?? Size.zero;
   }
 
   /// Check if video is playing
   bool get isPlaying {
-    return _controller.value.isPlaying;
+    return _controller?.value.isPlaying ?? false;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_isInitialized) {
+    final controller = _controller;
+    final chewie = _chewieController;
+    if (!_isInitialized || controller == null || chewie == null) {
       return Container(
         color: Colors.black,
         child: const Center(
@@ -166,12 +174,12 @@ class CleanVideoPlayerState extends State<CleanVideoPlayer> {
         child: AspectRatio(
           aspectRatio: _aspectRatio,
           child: ValueListenableBuilder(
-            valueListenable: _controller,
+            valueListenable: controller,
             builder: (context, VideoPlayerValue value, child) {
               return Stack(
                 children: [
                   // Video player - will rebuild when controller value changes
-                  Chewie(controller: _chewieController),
+                  Chewie(controller: chewie),
 
                   // Custom overlay (for trajectory, etc.)
                   if (widget.overlay != null)

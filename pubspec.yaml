@@ -1,5 +1,5 @@
 name: hooplab
-description: "A new Flutter project."
+description: "On-device basketball shot analysis — detects shots, tracks the ball, and scores makes and shooting form."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: "none" # Remove this line if you wish to publish to pub.dev
@@ -34,6 +34,7 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  path: ^1.9.0
   path_provider: ^2.1.5
   camera: ^0.11.3
   image_picker: ^1.2.0
@@ -47,6 +48,7 @@ dependencies:
       url: https://github.com/gevork/chewie.git
   ultralytics_yolo: 0.1.36
   google_mlkit_pose_detection: ^0.13.0
+  image: ^4.5.0
 
 dev_dependencies:
   flutter_test:

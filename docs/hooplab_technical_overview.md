@@ -43,7 +43,7 @@ The result is a timestamped shot-by-shot breakdown with percentage accuracy scor
 | Layer | Technology |
 |---|---|
 | Framework | Flutter 3 (Dart) |
-| Object Detection | YOLOv8 (TFLite FP16, on-device) via `ultralytics_yolo` |
+| Object Detection | YOLO11n (TFLite FP16, on-device) via `ultralytics_yolo` |
 | Pose Detection | Google ML Kit Pose Detection |
 | Video Processing | FFmpeg (`ffmpeg_kit_flutter_new`) |
 | Video Playback | `video_player` + custom Chewie fork |
@@ -56,25 +56,25 @@ The app is entirely self-contained at runtime. No server calls are made during a
 lib/
 ├── main.dart                    # App entry point, Material theme
 ├── pages/
-│   ├── method_selector.dart     # Landing screen — choose input method
+│   ├── method_selector.dart     # Landing screen + gallery import & trimmer
 │   ├── camera.dart              # In-app camera recording
-│   ├── viewer.dart              # Core analysis page (≈1800 lines)
-│   ├── live_shot_detector.dart  # Real-time detection (prototype)
-│   └── shot_replay_viewer.dart  # Replay viewer for live-detected shots
+│   ├── viewer.dart              # Core analysis page + results UI
+│   ├── session_history.dart     # Saved sessions + aggregate stats
+│   ├── shot_log.dart            # Per-shot breakdown for one session
+│   └── settings.dart            # Theme selection
 ├── models/
-│   ├── clip.dart                # Core data model: Clip, FrameData, Detection, Shot
-│   └── recorded_shot.dart       # Data model for live-detection sessions
+│   ├── clip.dart                # Clip, FrameData, Detection, BoundingBox, Shot + DetectionLabel
+│   └── session.dart             # Session, SavedShot (persisted to JSON)
+├── services/
+│   ├── session_storage.dart     # Session persistence (documents dir)
+│   └── theme_storage.dart       # Theme-mode persistence
 ├── widgets/
 │   ├── trajectory_overlay.dart  # CustomPaint: ball trajectory + pose skeleton
-│   ├── timeline.dart            # Video scrubber with detection markers
-│   └── clean_video_player.dart  # Video player wrapper
+│   └── clean_video_player.dart  # Video player wrapper (Chewie)
 └── utils/
-    ├── trajectory_prediction.dart  # All shot math: rim crossing, made detection
-    ├── shot_quality_evaluator.dart # Form scoring (arc, angle, consistency)
-    ├── shooting_pose_detector.dart # ML Kit pose wrapper
-    ├── detection_painter.dart      # Detection bounding-box painter
-    ├── frame_cache.dart            # Binary-search frame index cache
-    └── shot_analysis.dart          # Trajectory geometry helpers
+    ├── trajectory_prediction.dart  # Shot math: rim crossing, made detection, arc prediction
+    ├── shot_quality_evaluator.dart # Form scoring (arc, angle, distance, consistency)
+    └── shooting_pose_detector.dart # ML Kit pose → shooting-motion confidence
 ```
 
 ## 2.3 Primary Data Flow
@@ -88,9 +88,10 @@ FFmpeg extracts frames to temp directory
       ▼
 YOLO inference on each frame  ──►  FrameData { detections[] }
       │                                │
-      │  (parallel)                    │  labels: ball, hoop, rim, basket, made
+      │  (per frame)                   │  labels: ball, made, person, rim, shoot
       ▼                                ▼
-ML Kit Pose Detection        Stored in Clip.frames[]
+Shooting motion =            Stored in Clip.frames[]
+  ML Kit pose  ∪  YOLO "shoot" class
       │
       ▼
 Shot Segmentation
@@ -121,8 +122,7 @@ The top-level container for a single video analysis session.
 
 ```dart
 class Clip {
-  String id, name, video_path;
-  VideoInfo?  videoInfo;   // fps, dimensions, duration
+  String id, name, videoPath;
   List<FrameData> frames;  // one entry per analyzed frame
   List<Shot>  shots;       // detected shots (populated after segmentation)
 }
@@ -164,12 +164,20 @@ The result of segmenting and analyzing one shooting attempt.
 class Shot {
   int    id;
   List<FrameData> frames;
-  double startTime, endTime;
+  double  startTime, endTime;
   String? prediction;    // "MAKE • <form feedback>" or "MISS • ..."
   double? accuracy;      // 0–100 %
+  double? formScore;     // shooting-form quality, 0–100 (independent of make/miss)
+  String? feedback;      // human-readable form feedback
   Offset? hoopPosition;  // target hoop center (pixel coords)
+  bool get isMake;       // prediction starts with "MAKE"
 }
 ```
+
+Both segmentation paths score shots through a single shared helper
+(`viewer.dart → _scoreShot`), so make/miss determination and form scoring are
+identical regardless of which segmenter ran. `formScore` and `feedback` are
+persisted on `SavedShot` and shown in the viewer and session shot log.
 
 ---
 
@@ -185,24 +193,44 @@ FFmpeg extracts every frame from the video into a temporary directory at the dev
 
 `viewer.dart → analyzeVideoFrames()`
 
-Each frame image is fed to the on-device YOLOv8 model (`best_float16.tflite`). The model returns bounding boxes with labels. The labels relevant to shot analysis are:
+Each frame image is fed to the on-device YOLO model (`best_float16.tflite`). The model returns bounding boxes with labels. Its class set is:
 
-| Label | Meaning |
-|---|---|
-| `ball` | Basketball |
-| `hoop` / `rim` / `basket` | Basketball hoop (any of these) |
-| `made` | Ball detected inside / passing through the hoop |
+| Class id | Label | Meaning |
+|---|---|---|
+| 0 | `ball` | Basketball |
+| 1 | `made` | Ball detected inside / passing through the hoop |
+| 2 | `person` | A player (used to lock onto the shooter) |
+| 3 | `rim` | Basketball hoop / rim |
+| 4 | `shoot` | Shooting motion in progress |
 
-Detection results are stored as `FrameData` entries in `Clip.frames`. The `made` label is produced directly by the model when it observes the ball clearly inside the hoop — this is later used as a high-confidence MAKE signal.
+Detection results are stored as `FrameData` entries in `Clip.frames`. Label
+matching goes through the `DetectionLabel` extension in `clip.dart`
+(`isBall`, `isRim`, `isMade`, `isPerson`, `isShoot`), which accepts both the
+string class name and the numeric class id so the app is robust to whichever
+form the `ultralytics_yolo` plugin returns (legacy `hoop`/`basket` aliases also
+map to `isRim`). The `made` label is produced directly by the model when it
+observes the ball clearly inside the hoop — this is later used as a
+high-confidence MAKE signal.
 
 ## 4.3 Pose Detection
 
-`ShootingPoseDetector` runs Google ML Kit pose detection concurrently. It examines body landmark positions (wrists, elbows, shoulders) to determine whether a person is in a **shooting motion**. Each frame gets `isShootingMotion` and `shootingConfidence` populated.
+`ShootingPoseDetector` runs Google ML Kit pose detection on a padded crop
+around the locked shooter. It examines body landmark positions (wrists,
+elbows, shoulders) to determine whether a person is in a **shooting motion**.
 
 Key heuristics used:
 - Dominant wrist is above the shoulder (arm raised)
 - Elbow is above shoulder height
-- Body is in an upright stance (hip-to-shoulder vertical ratio)
+- Shooting-arm elbow angle is in the 90°–160° range
+
+**Two-signal shooting detection.** The pose result is fused with the model's
+own `shoot` class (`viewer.dart → analyzeVideoFrames`): a frame is marked as
+shooting motion when *either* ML Kit pose fires *or* a `shoot` detection is
+present with sufficient confidence, and `shootingConfidence` is the max of the
+two. Because the `shoot` box comes out of the same YOLO pass, this is
+essentially free and makes court-mode segmentation fire even when the skeleton
+is unclear. Fusion is strictly additive — it can only add shooting frames,
+never remove them.
 
 ---
 
@@ -357,7 +385,7 @@ The combined score drives the form feedback string appended to the prediction: `
 
 | Package | Purpose |
 |---|---|
-| `ultralytics_yolo 0.1.36` | On-device YOLOv8 inference via TFLite |
+| `ultralytics_yolo 0.1.36` | On-device YOLO11n inference via TFLite |
 | `google_mlkit_pose_detection ^0.13.0` | Body pose landmark detection |
 | `ffmpeg_kit_flutter_new ^3.2.0` | Frame extraction from video files |
 | `video_player ^2.10.0` | Video playback |
@@ -373,9 +401,9 @@ The combined score drives the form feedback string appended to the prediction: `
 # 11. ML Model
 
 **File**: `assets/best_float16.tflite`  
-**Architecture**: YOLOv8 (FP16 quantized for mobile)  
-**Size**: ~5.3 MB  
-**Classes**: `ball`, `hoop`, `rim`, `basket`, `made` (and potentially others)
+**Architecture**: YOLO11n (FP16 quantized for mobile)  
+**Input size**: 640×640  
+**Classes**: `0=ball`, `1=made`, `2=person`, `3=rim`, `4=shoot`
 
 The model runs entirely on-device using the Neural Engine (iOS) or GPU delegate (Android). No network access is required during inference. The FP16 quantization halves memory bandwidth vs. FP32 with minimal accuracy loss on detection tasks.
 
@@ -409,4 +437,4 @@ The model runs entirely on-device using the Neural Engine (iOS) or GPU delegate 
 
 ---
 
-*HoopLab — v1.0.2 · Built with Flutter · Powered by YOLOv8 + Google ML Kit*
+*HoopLab — v1.0.2 · Built with Flutter · Powered by YOLO11n + Google ML Kit*

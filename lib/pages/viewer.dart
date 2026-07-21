@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hooplab/models/clip.dart';
+import 'package:hooplab/models/session.dart';
+import 'package:hooplab/services/session_storage.dart';
 import 'package:hooplab/utils/shot_quality_evaluator.dart';
 import 'package:hooplab/widgets/clean_video_player.dart';
 import 'package:hooplab/widgets/trajectory_overlay.dart';
@@ -14,11 +16,12 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
+import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 
 class ViewerPage extends StatefulWidget {
   final String? videoPath;
-  ViewerPage({super.key, this.videoPath});
+  const ViewerPage({super.key, this.videoPath});
 
   @override
   State<ViewerPage> createState() => _ViewerPageState();
@@ -42,10 +45,13 @@ class _ViewerPageState extends State<ViewerPage> {
   int framesProcessed = 0;
   int totalDetections = 0;
   int shootingFramesDetected = 0; // Track frames with shooting motion
-  int curFrame = 0;
   int currentShotIndex = 0; // Track which shot we're viewing
   bool _isCancelled = false; // Track if extraction is cancelled
   Directory? _framesDir; // Temp dir for extracted frames, cleaned up after analysis
+
+  // Locks onto the player who first held the ball; tracked via bbox IoU across
+  // frames so pose detection stays on the same person after the ball leaves.
+  Rect? _shooterBbox;
 
   // Detection mode settings
   bool useCourtMode =
@@ -96,7 +102,7 @@ class _ViewerPageState extends State<ViewerPage> {
       final videoHeight = metadata.resolution.height.toInt();
 
       debugPrint(
-        '📊 Video metadata: ${videoWidth}x${videoHeight}, ${videoDurationSeconds}s',
+        '📊 Video metadata: ${videoWidth}x$videoHeight, ${videoDurationSeconds}s',
       );
 
       // Get video FPS using FFprobe
@@ -104,7 +110,7 @@ class _ViewerPageState extends State<ViewerPage> {
       final probeSession = await FFprobeKit.getMediaInformation(
         widget.videoPath!,
       );
-      final mediaInfo = await probeSession.getMediaInformation();
+      final mediaInfo = probeSession.getMediaInformation();
 
       // Extract FPS from media info
       double videoFPS = 30.0; // Default fallback
@@ -245,7 +251,7 @@ class _ViewerPageState extends State<ViewerPage> {
       };
 
       debugPrint(
-        '📋 Frame extraction complete: ${extractedFramesCount} frames ready for analysis',
+        '📋 Frame extraction complete: $extractedFramesCount frames ready for analysis',
       );
 
       return responseMetadata;
@@ -286,21 +292,6 @@ class _ViewerPageState extends State<ViewerPage> {
     );
   }
 
-  List<Detection> _getCurrentFrameDetections(int frameIndex) {
-    if (clip.frames.isEmpty ||
-        frameIndex < 0 ||
-        frameIndex >= clip.frames.length) {
-      return [];
-    }
-
-    return clip.frames[frameIndex].detections;
-  }
-
-  // Keep the old method for compatibility
-  List<Detection> getCurrentFrameDetections() {
-    return _getCurrentFrameDetections(curFrame);
-  }
-
   void _segmentShots() {
     if (clip.frames.isEmpty) return;
 
@@ -326,6 +317,56 @@ class _ViewerPageState extends State<ViewerPage> {
       '🏀 Starting shot segmentation with up/down regions (Backboard Mode)...',
     );
     _segmentShotsLegacy();
+  }
+
+  /// Score a segmented shot: MAKE/MISS + accuracy from the model's "made"
+  /// label (preferred) or rim-crossing geometry, plus an independent
+  /// shooting-form quality score. Populates [shot] in place. Shared by both
+  /// segmentation paths so scoring stays identical.
+  void _scoreShot(
+    Shot shot,
+    List<Offset> ballPositions,
+    Offset targetHoop,
+    BoundingBox? hoopBBox,
+  ) {
+    final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
+
+    // Geometry-based accuracy with dynamic per-frame hoop tracking.
+    final rimResult = TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
+      ballPoints: ballPositions,
+      hoopPosition: targetHoop,
+      hoopBBox: hoopBBox,
+      hoopRadius: hoopRadius,
+      frames: shot.frames,
+    );
+
+    // The model's "made" label is direct visual evidence — it overrides the
+    // geometry when present (crucial for sideways/court angles).
+    final madeResult = TrajectoryPredictor.checkMadeDetection(
+      shot.frames,
+      targetHoop,
+    );
+    final finalResult = madeResult ?? rimResult;
+
+    // Shooting-form quality, independent of whether the shot went in.
+    final quality = ShotQualityEvaluator.evaluateShotQuality(
+      ballTrajectory: ballPositions,
+      hoopPosition: targetHoop,
+      hoopRadius: hoopRadius,
+    );
+
+    shot.accuracy = finalResult.accuracy;
+    final verdict = finalResult.accuracy > 50.0 ? 'MAKE' : 'MISS';
+    final hasForm = quality.overallScore > 0;
+    shot.formScore = hasForm ? quality.overallScore : null;
+    shot.feedback = hasForm ? quality.feedback : null;
+    shot.prediction = hasForm ? '$verdict • ${quality.feedback}' : verdict;
+
+    if (finalResult.confidence != ShotConfidence.high) {
+      debugPrint(
+        '⚠️ Shot ${shot.id} ${finalResult.confidence} confidence: ${finalResult.reason}',
+      );
+    }
   }
 
   /// Legacy shot segmentation using ball trajectory only
@@ -359,7 +400,7 @@ class _ViewerPageState extends State<ViewerPage> {
     for (int i = 0; i < clip.frames.length; i++) {
       final frame = clip.frames[i];
       final ballDetections = frame.detections
-          .where((d) => d.label.toLowerCase().contains('ball'))
+          .where((d) => d.isBall)
           .toList();
 
       if (ballDetections.isNotEmpty) {
@@ -367,20 +408,23 @@ class _ViewerPageState extends State<ViewerPage> {
         final ballPos = Offset(ball.bbox.centerX, ball.bbox.centerY);
 
         consecutiveNoBallFrames = 0;
-        currentShotBallPositions.add(ballPos);
 
         // Check if ball enters "UP" region (around backboard, above hoop)
         if (!inUpRegion &&
             _isInUpRegion(ballPos, hoopPosition, ball.bbox, hoopBox: hoopBBox)) {
           inUpRegion = true;
           upFrameIndex = i;
-          currentShotFrames = [frame];
+          // Start a fresh shot window. Previously ball positions accumulated
+          // from before the shot, polluting the trajectory used for scoring.
+          currentShotFrames = [];
+          currentShotBallPositions = [];
           debugPrint('🏀 Ball in UP region at frame $i (${frame.timestamp}s)');
         }
 
-        // If already in up region, keep adding frames
+        // While inside the shot window, accumulate this frame + ball position.
         if (inUpRegion && !inDownRegion) {
           currentShotFrames.add(frame);
+          currentShotBallPositions.add(ballPos);
         }
 
         // Check if ball enters "DOWN" region (below the net)
@@ -396,7 +440,8 @@ class _ViewerPageState extends State<ViewerPage> {
 
         // Shot complete: went from UP → DOWN
         if (inUpRegion && inDownRegion && upFrameIndex < downFrameIndex) {
-          if (currentShotFrames.length >= 10) {
+          if (currentShotFrames.length >= 10 &&
+              currentShotBallPositions.length >= 3) {
             // Select the hoop the ball was actually aimed at (handles
             // multi-hoop scenes where a background hoop was detected first).
             final targetHoop =
@@ -410,44 +455,13 @@ class _ViewerPageState extends State<ViewerPage> {
               hoopPosition: targetHoop,
             );
 
-            // Calculate shot accuracy
-            final ballTrajectory = currentShotBallPositions;
-            if (ballTrajectory.length >= 3) {
-              // Get hoop bounding box filtered to the target hoop only
-              final hoopBBox = _getAverageHoopBBox(
-                upFrameIndex,
-                downFrameIndex,
-                null,
-                targetHoopPosition: targetHoop,
-              );
-
-              // Calculate accuracy percentage with dynamic hoop tracking
-              final accuracyResult =
-                  TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
-                    ballPoints: ballTrajectory,
-                    hoopPosition: targetHoop,
-                    hoopBBox: hoopBBox,
-                    hoopRadius: hoopBBox != null ? hoopBBox.width / 2 : 30.0,
-                    frames: currentShotFrames,
-                  );
-
-              // "made" label from model overrides rim crossing when present
-              final madeResult = TrajectoryPredictor.checkMadeDetection(
-                currentShotFrames,
-                targetHoop,
-              );
-
-              final finalResult = madeResult ?? accuracyResult;
-              shot.accuracy = finalResult.accuracy;
-              shot.prediction = finalResult.accuracy > 50.0 ? "MAKE" : "MISS";
-
-              // Log confidence level
-              if (finalResult.confidence != ShotConfidence.high) {
-                debugPrint(
-                  '⚠️ Shot ${shot.id} has ${finalResult.confidence} confidence: ${finalResult.reason}',
-                );
-              }
-            }
+            final hoopBBox = _getAverageHoopBBox(
+              upFrameIndex,
+              downFrameIndex,
+              null,
+              targetHoopPosition: targetHoop,
+            );
+            _scoreShot(shot, currentShotBallPositions, targetHoop, hoopBBox);
 
             shots.add(shot);
             debugPrint(
@@ -527,7 +541,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
         // Track ball position during shooting motion
         final ballDetections = frame.detections
-            .where((d) => d.label.toLowerCase().contains('ball'))
+            .where((d) => d.isBall)
             .toList();
 
         if (ballDetections.isNotEmpty) {
@@ -547,7 +561,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
             // Continue tracking ball
             final ballDetections = frame.detections
-                .where((d) => d.label.toLowerCase().contains('ball'))
+                .where((d) => d.isBall)
                 .toList();
 
             if (ballDetections.isNotEmpty) {
@@ -571,55 +585,20 @@ class _ViewerPageState extends State<ViewerPage> {
                 hoopPosition: targetHoop,
               );
 
-              // Calculate shot accuracy using the specific hoop this shot
-              // was aimed at (not the global first-found hoop).
+              // Score using the specific hoop this shot was aimed at (not the
+              // global first-found hoop).
               final hoopBBox = _getAverageHoopBBox(
                 shootingStartFrame,
                 i - 1,
                 null,
                 targetHoopPosition: targetHoop,
               );
-              final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
-
-              // Use rim crossing detection to determine if shot went in
-              final rimCrossingResult =
-                  TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
-                    ballPoints: currentShotBallPositions,
-                    hoopPosition: targetHoop,
-                    hoopBBox: hoopBBox,
-                    hoopRadius: hoopRadius,
-                    frames: currentShotFrames,
-                  );
-
-              // Secondary check: "made" label from model is direct visual
-              // evidence the ball went through the hoop — overrides rim
-              // crossing when present (especially useful in sideways view
-              // where Y-axis crossing geometry is unreliable).
-              final madeResult = TrajectoryPredictor.checkMadeDetection(
-                currentShotFrames,
+              _scoreShot(
+                shot,
+                currentShotBallPositions,
                 targetHoop,
+                hoopBBox,
               );
-
-              // Also evaluate shot quality/form for additional feedback
-              final qualityResult = ShotQualityEvaluator.evaluateShotQuality(
-                ballTrajectory: currentShotBallPositions,
-                hoopPosition: targetHoop,
-                hoopRadius: hoopRadius,
-              );
-
-              // Use "made" detection if available, otherwise fall back to
-              // rim crossing geometry.
-              final finalResult = madeResult ?? rimCrossingResult;
-              shot.accuracy = finalResult.accuracy;
-
-              // Prediction: MAKE/MISS based on final result + quality feedback
-              if (finalResult.accuracy > 50.0) {
-                shot.prediction = "MAKE • ${qualityResult.feedback}";
-              } else {
-                shot.prediction = "MISS • ${qualityResult.feedback}";
-              }
-
-              debugPrint('🏀 SHOT ACCURACY: ${shot.accuracy}');
 
               shots.add(shot);
               debugPrint(
@@ -664,35 +643,7 @@ class _ViewerPageState extends State<ViewerPage> {
           null,
           targetHoopPosition: lastTargetHoop,
         );
-        final hoopRadius = hoopBBox != null ? hoopBBox.width / 2 : 30.0;
-
-        final rimCrossingResult =
-            TrajectoryPredictor.calculateShotAccuracyFromRimCrossing(
-              ballPoints: currentShotBallPositions,
-              hoopPosition: lastTargetHoop,
-              hoopBBox: hoopBBox,
-              hoopRadius: hoopRadius,
-              frames: currentShotFrames,
-            );
-
-        final madeResult = TrajectoryPredictor.checkMadeDetection(
-          currentShotFrames,
-          lastTargetHoop,
-        );
-
-        final qualityResult = ShotQualityEvaluator.evaluateShotQuality(
-          ballTrajectory: currentShotBallPositions,
-          hoopPosition: lastTargetHoop,
-          hoopRadius: hoopRadius,
-        );
-
-        final finalResult = madeResult ?? rimCrossingResult;
-        shot.accuracy = finalResult.accuracy;
-        if (finalResult.accuracy > 50.0) {
-          shot.prediction = "MAKE • ${qualityResult.feedback}";
-        } else {
-          shot.prediction = "MISS • ${qualityResult.feedback}";
-        }
+        _scoreShot(shot, currentShotBallPositions, lastTargetHoop, hoopBBox);
       }
 
       shots.add(shot);
@@ -750,12 +701,7 @@ class _ViewerPageState extends State<ViewerPage> {
   Offset? _findHoopPosition() {
     for (final frame in clip.frames) {
       final hoopDetections = frame.detections
-          .where(
-            (d) =>
-                d.label.toLowerCase().contains('hoop') ||
-                d.label.toLowerCase().contains('rim') ||
-                d.label.toLowerCase().contains('basket'),
-          )
+          .where((d) => d.isRim)
           .toList();
 
       if (hoopDetections.isNotEmpty) {
@@ -776,12 +722,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
     for (final frame in shotFrames) {
       final hoopDetections = frame.detections
-          .where(
-            (d) =>
-                d.label.toLowerCase().contains('hoop') ||
-                d.label.toLowerCase().contains('rim') ||
-                d.label.toLowerCase().contains('basket'),
-          )
+          .where((d) => d.isRim)
           .toList();
 
       for (final hoop in hoopDetections) {
@@ -830,7 +771,7 @@ class _ViewerPageState extends State<ViewerPage> {
     final ballPositions = <Offset>[];
     for (final frame in shotFrames) {
       final ball = frame.detections
-          .where((d) => d.label.toLowerCase().contains('ball'))
+          .where((d) => d.isBall)
           .firstOrNull;
       if (ball != null) {
         ballPositions.add(Offset(ball.bbox.centerX, ball.bbox.centerY));
@@ -971,7 +912,7 @@ class _ViewerPageState extends State<ViewerPage> {
       }
     }
 
-    // TIER 3: All-frame minimum proximity — last resort fallback.
+    // TIER 4: All-frame minimum proximity — last resort fallback.
     debugPrint('⚠️ Falling back to all-frame proximity-based hoop selection');
     Map<String, double> minDistances = {};
 
@@ -982,7 +923,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
       for (final frame in shotFrames) {
         final ballDetections = frame.detections
-            .where((d) => d.label.toLowerCase().contains('ball'))
+            .where((d) => d.isBall)
             .toList();
 
         if (ballDetections.isNotEmpty) {
@@ -1035,9 +976,9 @@ class _ViewerPageState extends State<ViewerPage> {
 
     for (final frame in frames) {
       for (final d in frame.detections) {
-        if (!d.label.toLowerCase().contains('hoop') &&
-            !d.label.toLowerCase().contains('rim') &&
-            !d.label.toLowerCase().contains('basket')) continue;
+        if (!d.isRim) {
+          continue;
+        }
 
         final center = Offset(d.bbox.centerX, d.bbox.centerY);
         if ((center - targetHoopPos).distance > 100) continue;
@@ -1088,13 +1029,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
     for (int i = startFrame; i <= end; i++) {
       final frame = clip.frames[i];
-      final hoopDetections = frame.detections.where(
-        (d) =>
-            d.label.toLowerCase().contains('hoop') ||
-            d.label.toLowerCase().contains('rim') ||
-            d.label.toLowerCase().contains('basket') ||
-            d.label == '3',
-      );
+      final hoopDetections = frame.detections.where((d) => d.isRim);
 
       for (final hoop in hoopDetections) {
         // When a target hoop is known, skip detections that belong to other
@@ -1207,7 +1142,7 @@ class _ViewerPageState extends State<ViewerPage> {
     clip = Clip(
       id: "1",
       name: "Test Clip",
-      video_path: widget.videoPath!,
+      videoPath: widget.videoPath!,
       frames: [],
     );
   }
@@ -1218,7 +1153,6 @@ class _ViewerPageState extends State<ViewerPage> {
 
   void initializeYoloModel() async {
     try {
-      // Initialize YOLO for ball/hoop detection
       yoloModel = YOLO(
         modelPath: 'best_float16',
         task: YOLOTask.detect,
@@ -1226,17 +1160,22 @@ class _ViewerPageState extends State<ViewerPage> {
       );
       await yoloModel!.loadModel();
       debugPrint('✅ YOLO model loaded successfully');
+    } catch (e, st) {
+      debugPrint('❌ Error initializing YOLO: $e');
+      debugPrint('$st');
+    }
 
-      // Initialize ML Kit pose detector for shooting motion detection
+    try {
       poseDetector = ShootingPoseDetector(
         options: PoseDetectorOptions(
-          mode: PoseDetectionMode.stream,
-          model: PoseDetectionModel.accurate,
+          mode: PoseDetectionMode.single,
+          model: PoseDetectionModel.base,
         ),
       );
       debugPrint('✅ ML Kit pose detector initialized');
-    } catch (e) {
-      debugPrint('❌ Error initializing models: $e');
+    } catch (e, st) {
+      debugPrint('❌ Error initializing pose detector: $e');
+      debugPrint('$st');
     }
   }
 
@@ -1250,6 +1189,260 @@ class _ViewerPageState extends State<ViewerPage> {
       _framesDir?.deleteSync(recursive: true);
     } catch (_) {}
     super.dispose();
+  }
+
+  Rect? _selectShooterBbox(List<Rect> personBoxes, Offset? ballPosition) {
+    if (personBoxes.isEmpty) return _shooterBbox;
+
+    if (_shooterBbox == null) {
+      // Not locked yet — wait for ball to appear, then pick the person whose
+      // box contains (or is closest to) the ball.
+      if (ballPosition == null) return null;
+      Rect? best;
+      double bestDist = double.infinity;
+      for (final person in personBoxes) {
+        if (person.contains(ballPosition)) {
+          _shooterBbox = person;
+          debugPrint('🔒 Shooter locked (ball inside person box)');
+          return person;
+        }
+        final d = (person.center - ballPosition).distance;
+        if (d < bestDist) {
+          bestDist = d;
+          best = person;
+        }
+      }
+      // Only lock if the ball is near the person (roughly within 1 person-width)
+      if (best != null && bestDist < best.width * 1.5) {
+        _shooterBbox = best;
+        debugPrint('🔒 Shooter locked (nearest to ball, ${bestDist.toStringAsFixed(0)}px)');
+        return best;
+      }
+      return null;
+    }
+
+    // Already locked — pick person box with highest IoU to previous shooter box.
+    Rect? best;
+    double bestIoU = 0;
+    for (final person in personBoxes) {
+      final iou = _iou(person, _shooterBbox!);
+      if (iou > bestIoU) {
+        bestIoU = iou;
+        best = person;
+      }
+    }
+    if (best != null && bestIoU > 0.1) {
+      _shooterBbox = best;
+      return best;
+    }
+    // No overlap — likely brief occlusion. Keep last-known bbox.
+    return _shooterBbox;
+  }
+
+  double _iou(Rect a, Rect b) {
+    final ix1 = a.left > b.left ? a.left : b.left;
+    final iy1 = a.top > b.top ? a.top : b.top;
+    final ix2 = a.right < b.right ? a.right : b.right;
+    final iy2 = a.bottom < b.bottom ? a.bottom : b.bottom;
+    final iw = ix2 - ix1;
+    final ih = iy2 - iy1;
+    if (iw <= 0 || ih <= 0) return 0;
+    final inter = iw * ih;
+    final union = a.width * a.height + b.width * b.height - inter;
+    return union <= 0 ? 0 : inter / union;
+  }
+
+  Future<({String path, Offset origin})?> _cropAroundBbox(
+    String framePath,
+    Rect bbox,
+  ) async {
+    try {
+      final bytes = await File(framePath).readAsBytes();
+      final decoded = img.decodeJpg(bytes);
+      if (decoded == null) return null;
+
+      // Pad 30% around the person so MLKit sees head + feet + limbs at full extension.
+      const padRatio = 0.3;
+      final padX = bbox.width * padRatio;
+      final padY = bbox.height * padRatio;
+      final left = (bbox.left - padX).clamp(0, decoded.width.toDouble()).toInt();
+      final top = (bbox.top - padY).clamp(0, decoded.height.toDouble()).toInt();
+      final right = (bbox.right + padX).clamp(0, decoded.width.toDouble()).toInt();
+      final bottom = (bbox.bottom + padY).clamp(0, decoded.height.toDouble()).toInt();
+      final cropW = right - left;
+      final cropH = bottom - top;
+      if (cropW < 32 || cropH < 32) return null;
+
+      final cropped = img.copyCrop(
+        decoded,
+        x: left,
+        y: top,
+        width: cropW,
+        height: cropH,
+      );
+      final jpg = img.encodeJpg(cropped, quality: 90);
+
+      final dir = _framesDir?.path ?? Directory.systemTemp.path;
+      final outPath = p.join(dir, 'shooter_crop.jpg');
+      await File(outPath).writeAsBytes(jpg, flush: true);
+      return (path: outPath, origin: Offset(left.toDouble(), top.toDouble()));
+    } catch (e) {
+      debugPrint('❌ Crop failed: $e');
+      return null;
+    }
+  }
+
+  void _showAnalysisCompleteSnackbar() {
+    if (!mounted) return;
+    final total = clip.shots.length;
+    final makes = clip.shots
+        .where((s) => s.prediction?.startsWith('MAKE') ?? false)
+        .length;
+    final misses = total - makes;
+    final pct = total > 0 ? (makes / total * 100).toStringAsFixed(0) : '—';
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 6),
+        content: Text(
+          total == 0
+              ? 'Analysis complete · no shots detected'
+              : 'Analysis complete · $total shot${total == 1 ? '' : 's'} · '
+                  '$makes made · $misses missed · $pct%',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        action: total == 0
+            ? null
+            : SnackBarAction(
+                label: 'Save',
+                onPressed: _promptSaveSession,
+              ),
+      ),
+    );
+  }
+
+  SavedShot _toSavedShot(Shot shot) {
+    // shot.prediction is "MAKE • feedback…" or "MISS • feedback…"; strip to bare verdict.
+    String? verdict;
+    if (shot.prediction != null) {
+      final p = shot.prediction!;
+      if (p.startsWith('MAKE')) {
+        verdict = 'MAKE';
+      } else if (p.startsWith('MISS')) {
+        verdict = 'MISS';
+      }
+    }
+    return SavedShot(
+      id: shot.id,
+      startTime: shot.startTime,
+      endTime: shot.endTime,
+      prediction: verdict,
+      accuracy: shot.accuracy,
+      formScore: shot.formScore,
+      feedback: shot.feedback,
+      ballTrajectory: shot.ballTrajectory,
+      hoopPosition: shot.hoopPosition,
+    );
+  }
+
+  String _defaultSessionName() {
+    final now = DateTime.now();
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final hour = now.hour % 12 == 0 ? 12 : now.hour % 12;
+    final min = now.minute.toString().padLeft(2, '0');
+    final ampm = now.hour < 12 ? 'AM' : 'PM';
+    return '${months[now.month - 1]} ${now.day} · $hour:$min $ampm';
+  }
+
+  Future<void> _promptSaveSession() async {
+    if (clip.shots.isEmpty) return;
+
+    final makes = clip.shots.where((s) => s.prediction?.startsWith('MAKE') ?? false).length;
+    final total = clip.shots.length;
+    final controller = TextEditingController(text: _defaultSessionName());
+
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Save session'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('$makes / $total made'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Session name',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (v) => Navigator.pop(dialogCtx, v.trim()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(dialogCtx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (name == null || name.isEmpty) return;
+
+    final now = DateTime.now();
+    final session = Session(
+      id: now.microsecondsSinceEpoch.toString(),
+      createdAt: now,
+      updatedAt: now,
+      videoPath: widget.videoPath ?? '',
+      name: name,
+      shots: clip.shots.map(_toSavedShot).toList(),
+    );
+    await SessionStorage.save(session);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Saved "$name" · $makes/$total made'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  ShootingPoseResult _shiftPoseResult(ShootingPoseResult r, Offset origin) {
+    Pose shift(Pose p) => Pose(
+      landmarks: {
+        for (final e in p.landmarks.entries)
+          e.key: PoseLandmark(
+            type: e.value.type,
+            x: e.value.x + origin.dx,
+            y: e.value.y + origin.dy,
+            z: e.value.z,
+            likelihood: e.value.likelihood,
+          ),
+      },
+    );
+    return ShootingPoseResult(
+      isShootingMotion: r.isShootingMotion,
+      poses: r.poses.map(shift).toList(),
+      shootingConfidence: r.shootingConfidence,
+      shootingPose: r.shootingPose == null ? null : shift(r.shootingPose!),
+      shootingDuration: r.shootingDuration,
+    );
   }
 
   Stream<FrameData> analyzeVideoFrames() async* {
@@ -1286,7 +1479,7 @@ class _ViewerPageState extends State<ViewerPage> {
 
     // Video metadata handled by CleanVideoPlayer
 
-    for (int idx = 0; idx < frameResponse!['extracted_frames']; idx += 1) {
+    for (int idx = 0; idx < frameResponse['extracted_frames']; idx += 1) {
       // Check if cancelled during analysis
       if (_isCancelled) {
         debugPrint('❌ Analysis cancelled during YOLO processing');
@@ -1318,35 +1511,55 @@ class _ViewerPageState extends State<ViewerPage> {
           confidenceThreshold: 0.25,
         );
 
-        // Extract ball position from YOLO results for pose correlation
+        // Extract ball position + all person boxes from YOLO results
         Offset? ballPosition;
+        final personBoxes = <Rect>[];
         if (results.containsKey('boxes') && results['boxes'] is List) {
           final boxes = results['boxes'] as List;
           for (var box in boxes) {
             if (box is Map) {
               final className =
                   box['class_id']?.toString() ?? box['class']?.toString() ?? '';
-              if (className.toLowerCase().contains('ball')) {
-                final x1 = (box['x1'] ?? 0).toDouble();
-                final y1 = (box['y1'] ?? 0).toDouble();
-                final x2 = (box['x2'] ?? 0).toDouble();
-                final y2 = (box['y2'] ?? 0).toDouble();
-                ballPosition = Offset((x1 + x2) / 2, (y1 + y2) / 2);
-                break;
+              final x1 = (box['x1'] ?? 0).toDouble();
+              final y1 = (box['y1'] ?? 0).toDouble();
+              final x2 = (box['x2'] ?? 0).toDouble();
+              final y2 = (box['y2'] ?? 0).toDouble();
+              final lower = className.toLowerCase();
+              if (lower.contains('ball')) {
+                ballPosition ??= Offset((x1 + x2) / 2, (y1 + y2) / 2);
+              } else if (lower.contains('person')) {
+                personBoxes.add(Rect.fromLTRB(x1, y1, x2, y2));
               }
             }
           }
         }
 
-        // Run pose detection with ball position for multi-person scenarios
-        final inputImage = InputImage.fromFilePath(framePath);
-        final poseResult = await poseDetector?.detectShootingPose(
-          inputImage,
-          ballPosition: ballPosition,
-        );
+        // Pick the shooter box for this frame — lock on first ball-holding
+        // frame, then track by IoU so we stay on the same player.
+        final Rect? shooterBbox = _selectShooterBbox(personBoxes, ballPosition);
+
+        // Run MLKit pose on a padded crop around the shooter — full frames
+        // downscale the player too small for the model to resolve keypoints.
+        // Landmarks come back in crop-local space; shift by crop origin so the
+        // overlay draws on top of the player in full-frame coordinates.
+        ShootingPoseResult? poseResult;
+        if (shooterBbox != null && poseDetector != null) {
+          final crop = await _cropAroundBbox(framePath, shooterBbox);
+          if (crop != null) {
+            final inputImage = InputImage.fromFilePath(crop.path);
+            poseResult = _shiftPoseResult(
+              await poseDetector!.detectShootingPose(inputImage),
+              crop.origin,
+            );
+            try {
+              await File(crop.path).delete();
+            } catch (_) {}
+          }
+        }
 
         debugPrint(
-          '🏃 Pose detection: isShootingMotion=${poseResult?.isShootingMotion ?? false}, '
+          '🏃 Pose detection: shooterLocked=${_shooterBbox != null}, '
+          'isShootingMotion=${poseResult?.isShootingMotion ?? false}, '
           'confidence=${poseResult?.shootingConfidence.toStringAsFixed(2) ?? "0.00"}',
         );
 
@@ -1397,15 +1610,31 @@ class _ViewerPageState extends State<ViewerPage> {
         framesProcessed++;
 
         debugPrint(
-          '📊 Frame #$frameNumber summary: ${detectionsInFrame} detections (Total: $totalDetections)',
+          '📊 Frame #$frameNumber summary: $detectionsInFrame detections (Total: $totalDetections)',
         );
+
+        // The model has a dedicated "shoot" class — a direct, essentially-free
+        // shooting signal (it comes out of the same YOLO pass). Fuse it with
+        // ML Kit pose so court-mode segmentation still fires when the skeleton
+        // is unclear. This can only ever ADD shooting frames, never remove them.
+        double shootConfidence = 0.0;
+        for (final d in frameDetections) {
+          if (d.isShoot && d.confidence > shootConfidence) {
+            shootConfidence = d.confidence;
+          }
+        }
+        final poseShooting = poseResult?.isShootingMotion ?? false;
+        final poseConfidence = poseResult?.shootingConfidence ?? 0.0;
+        final isShooting = poseShooting || shootConfidence >= 0.45;
+        final shootingConfidence =
+            poseConfidence > shootConfidence ? poseConfidence : shootConfidence;
 
         final frameData = FrameData(
           frameNumber: frameNumber,
           timestamp: preciseTimestampMs / 1000.0,
           detections: frameDetections,
-          isShootingMotion: poseResult?.isShootingMotion ?? false,
-          shootingConfidence: poseResult?.shootingConfidence ?? 0.0,
+          isShootingMotion: isShooting,
+          shootingConfidence: shootingConfidence,
           poses: poseResult?.poses, // Store pose data for visualization
         );
 
@@ -1520,9 +1749,9 @@ class _ViewerPageState extends State<ViewerPage> {
               // Control panel
               Container(
                 padding: const EdgeInsets.all(16),
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.only(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surface,
+                  borderRadius: const BorderRadius.only(
                     topLeft: Radius.circular(20),
                     topRight: Radius.circular(20),
                   ),
@@ -1536,10 +1765,10 @@ class _ViewerPageState extends State<ViewerPage> {
                         padding: const EdgeInsets.all(12),
                         margin: const EdgeInsets.only(bottom: 12),
                         decoration: BoxDecoration(
-                          color: Colors.blue.withOpacity(0.1),
+                          color: Colors.blue.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: Colors.blue.withOpacity(0.3),
+                            color: Colors.blue.withValues(alpha: 0.3),
                           ),
                         ),
                         child: Column(
@@ -1553,75 +1782,70 @@ class _ViewerPageState extends State<ViewerPage> {
                               ),
                             ),
                             const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: RadioListTile<bool>(
-                                    dense: true,
-                                    contentPadding: EdgeInsets.zero,
-                                    title: const Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          '🏀 Backboard View',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
+                            RadioGroup<bool>(
+                              groupValue: useCourtMode,
+                              onChanged: (value) {
+                                if (value == null) return;
+                                setState(() => useCourtMode = value);
+                              },
+                              child: const Row(
+                                children: [
+                                  Expanded(
+                                    child: RadioListTile<bool>(
+                                      dense: true,
+                                      contentPadding: EdgeInsets.zero,
+                                      title: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            '🏀 Backboard View',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                            ),
                                           ),
-                                        ),
-                                        Text(
-                                          'Backboard visible',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: Colors.grey,
+                                          Text(
+                                            'Backboard visible',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              color: Colors.grey,
+                                            ),
                                           ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
+                                      value: false,
                                     ),
-                                    value: false,
-                                    groupValue: useCourtMode,
-                                    onChanged: (value) {
-                                      setState(() {
-                                        useCourtMode = value!;
-                                      });
-                                    },
                                   ),
-                                ),
-                                Expanded(
-                                  child: RadioListTile<bool>(
-                                    dense: true,
-                                    contentPadding: EdgeInsets.zero,
-                                    title: const Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          '🏃 Court/Sideways',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
+                                  Expanded(
+                                    child: RadioListTile<bool>(
+                                      dense: true,
+                                      contentPadding: EdgeInsets.zero,
+                                      title: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            '🏃 Court/Sideways',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                            ),
                                           ),
-                                        ),
-                                        Text(
-                                          'Uses pose detection',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: Colors.grey,
+                                          Text(
+                                            'Uses pose detection',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              color: Colors.grey,
+                                            ),
                                           ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
+                                      value: true,
                                     ),
-                                    value: true,
-                                    groupValue: useCourtMode,
-                                    onChanged: (value) {
-                                      setState(() {
-                                        useCourtMode = value!;
-                                      });
-                                    },
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
                           ],
                         ),
@@ -1643,6 +1867,7 @@ class _ViewerPageState extends State<ViewerPage> {
                               shootingFramesDetected = 0;
                               framesProcessed = 0;
                               currentShotIndex = 0;
+                              _shooterBbox = null; // Re-lock shooter each run
                             });
 
                             final subscription = analyzeVideoFrames().listen(
@@ -1666,6 +1891,7 @@ class _ViewerPageState extends State<ViewerPage> {
                                     isAnalyzing = false;
                                   });
                                   _segmentShots();
+                                  _showAnalysisCompleteSnackbar();
                                 }
                               },
                               onError: (error) {
@@ -1698,10 +1924,10 @@ class _ViewerPageState extends State<ViewerPage> {
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: Colors.blue.withOpacity(0.1),
+                          color: Colors.blue.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: Colors.blue.withOpacity(0.3),
+                            color: Colors.blue.withValues(alpha: 0.3),
                           ),
                         ),
                         child: Column(
@@ -1725,7 +1951,9 @@ class _ViewerPageState extends State<ViewerPage> {
                                         'Analyzing frames...',
                                         style: TextStyle(
                                           fontWeight: FontWeight.bold,
-                                          color: Colors.grey[800],
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.onSurface,
                                         ),
                                       ),
                                       Text(
@@ -1787,6 +2015,8 @@ class _ViewerPageState extends State<ViewerPage> {
                     if (!isAnalyzing && clip.frames.isNotEmpty) ...[
                       // Multi-shot navigation and prediction
                       if (clip.shots.isNotEmpty) ...[
+                        _SessionSummary(shots: clip.shots),
+                        const SizedBox(height: 12),
                         // Shot selector with navigation
                         Container(
                           padding: const EdgeInsets.all(12),
@@ -1898,121 +2128,65 @@ class _ViewerPageState extends State<ViewerPage> {
                               ),
                               const SizedBox(height: 8),
 
-                              // Current shot accuracy display
+                              // Current shot result: verdict + accuracy + form
                               if (clip.shots[currentShotIndex].accuracy != null)
-                                Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: [
-                                        Color.lerp(
-                                          Colors.red,
-                                          Colors.green,
-                                          clip
-                                                  .shots[currentShotIndex]
-                                                  .accuracy! /
-                                              100,
-                                        )!.withValues(alpha: 0.2),
-                                        Color.lerp(
-                                          Colors.red,
-                                          Colors.green,
-                                          clip
-                                                  .shots[currentShotIndex]
-                                                  .accuracy! /
-                                              100,
-                                        )!.withValues(alpha: 0.05),
-                                      ],
-                                    ),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: Color.lerp(
-                                        Colors.red,
-                                        Colors.green,
-                                        clip.shots[currentShotIndex].accuracy! /
-                                            100,
-                                      )!,
-                                      width: 3,
-                                    ),
-                                  ),
-                                  child: Column(
-                                    children: [
-                                      Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          Icon(
-                                            Icons.track_changes,
-                                            color: Color.lerp(
-                                              Colors.red,
-                                              Colors.green,
-                                              clip
-                                                      .shots[currentShotIndex]
-                                                      .accuracy! /
-                                                  100,
-                                            ),
-                                            size: 24,
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Text(
-                                            'Shot Accuracy',
-                                            style: TextStyle(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w600,
-                                              color: Colors.grey[700],
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        '${clip.shots[currentShotIndex].accuracy!.toStringAsFixed(1)}%',
-                                        style: TextStyle(
-                                          fontSize: 36,
-                                          fontWeight: FontWeight.bold,
-                                          color: Color.lerp(
-                                            Colors.red,
-                                            Colors.green,
-                                            clip
-                                                    .shots[currentShotIndex]
-                                                    .accuracy! /
-                                                100,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                                _ShotResultCard(
+                                  shot: clip.shots[currentShotIndex],
                                 ),
                             ],
                           ),
                         ),
                       ],
-                      ElevatedButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            clip.frames.clear();
-                            clip.shots.clear();
-                            totalDetections = 0;
-                            framesProcessed = 0;
-                            currentShotIndex = 0;
-                          });
-                        },
-                        icon: const Icon(Icons.refresh),
-                        label: const Text("Re-analyze"),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.grey[600],
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  clip.frames.clear();
+                                  clip.shots.clear();
+                                  totalDetections = 0;
+                                  shootingFramesDetected = 0;
+                                  framesProcessed = 0;
+                                  currentShotIndex = 0;
+                                  _shooterBbox = null;
+                                });
+                              },
+                              icon: const Icon(Icons.refresh),
+                              label: const Text("Re-analyze"),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.grey[600],
+                                foregroundColor: Colors.white,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: clip.shots.isEmpty
+                                  ? null
+                                  : _promptSaveSession,
+                              icon: const Icon(Icons.save_rounded),
+                              label: const Text("Save Session"),
+                              style: ElevatedButton.styleFrom(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 8),
                       // Analysis summary with pose detection info
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: Colors.green.withOpacity(0.1),
+                          color: Colors.green.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: Colors.green.withOpacity(0.3),
+                            color: Colors.green.withValues(alpha: 0.3),
                           ),
                         ),
                         child: Column(
@@ -2031,7 +2205,9 @@ class _ViewerPageState extends State<ViewerPage> {
                                   style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.bold,
-                                    color: Colors.grey[800],
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurface,
                                   ),
                                 ),
                               ],
@@ -2310,6 +2486,176 @@ class _ViewerPageState extends State<ViewerPage> {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// Result card for a single shot: MAKE/MISS verdict, accuracy %, and the
+/// shooting-form feedback. Color scales red→green with accuracy.
+class _ShotResultCard extends StatelessWidget {
+  final Shot shot;
+  const _ShotResultCard({required this.shot});
+
+  @override
+  Widget build(BuildContext context) {
+    final accuracy = shot.accuracy ?? 0;
+    final tint = Color.lerp(Colors.red, Colors.green, accuracy / 100)!;
+    final isMake = shot.isMake;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [tint.withValues(alpha: 0.2), tint.withValues(alpha: 0.05)],
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: tint, width: 3),
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                isMake ? Icons.check_circle : Icons.cancel,
+                color: isMake ? Colors.green : Colors.red,
+                size: 22,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                isMake ? 'MAKE' : 'MISS',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1,
+                  color: isMake ? Colors.green : Colors.red,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${accuracy.toStringAsFixed(1)}%',
+            style: TextStyle(
+              fontSize: 36,
+              fontWeight: FontWeight.bold,
+              color: tint,
+            ),
+          ),
+          Text(
+            'Shot accuracy',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey[600],
+            ),
+          ),
+          if (shot.formScore != null) ...[
+            const SizedBox(height: 10),
+            const Divider(height: 1),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.sports_basketball, size: 16, color: Colors.orange),
+                const SizedBox(width: 6),
+                Text(
+                  'Form ${shot.formScore!.toStringAsFixed(0)}/100',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            if (shot.feedback != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                shot.feedback!,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SessionSummary extends StatelessWidget {
+  final List<Shot> shots;
+  const _SessionSummary({required this.shots});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final total = shots.length;
+    final makes = shots
+        .where((s) => s.prediction?.startsWith('MAKE') ?? false)
+        .length;
+    final misses = total - makes;
+    final pct = total > 0 ? makes / total * 100 : 0.0;
+    final pctColor = total == 0
+        ? cs.onSurface.withValues(alpha: 0.4)
+        : pct >= 50
+            ? Colors.green
+            : pct >= 30
+                ? Colors.orange
+                : Colors.red;
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _SummaryStat(label: 'Shots', value: '$total'),
+          _SummaryStat(label: 'Makes', value: '$makes', color: Colors.green),
+          _SummaryStat(label: 'Misses', value: '$misses', color: Colors.red),
+          _SummaryStat(
+            label: 'Make %',
+            value: '${pct.toStringAsFixed(0)}%',
+            color: pctColor,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SummaryStat extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color? color;
+  const _SummaryStat({required this.label, required this.value, this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          value,
+          style: theme.textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: color ?? theme.colorScheme.onSurface,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.65),
+          ),
+        ),
+      ],
     );
   }
 }

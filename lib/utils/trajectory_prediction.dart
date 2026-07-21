@@ -63,13 +63,8 @@ class TrajectoryPredictor {
 
     if (startPoints.length < 2) return [];
 
-    // Get the starting point and initial velocity direction
+    // Get the starting point of the trajectory
     final startPoint = startPoints.first;
-    final secondPoint = startPoints[1];
-
-    // Calculate initial direction
-    final initialDx = secondPoint.dx - startPoint.dx;
-    final initialDy = secondPoint.dy - startPoint.dy;
 
     // Calculate the arc that would reach the hoop center
     final dx = hoopPosition.dx - startPoint.dx;
@@ -107,17 +102,32 @@ class TrajectoryPredictor {
     required Offset hoopPosition,
     double hoopRadius = 30.0,
   }) {
-    // add  more point in-between ballPoints if not enough
-    final int originalLength = ballPoints.length;
-    for (int i = 1; i < originalLength; i++) {
-      Offset point1 = ballPoints[i - 1];
-      Offset point2 = ballPoints[i];
+    // Work on a copy — the caller reuses [ballPoints] for trajectory
+    // prediction, so mutating it here would corrupt those results.
+    final points = _densify(ballPoints);
+    if (points.length < 3) return false;
+    return _rimCrossingIsMake(points, hoopPosition, hoopRadius);
+  }
 
-      Offset inBetween = Offset.lerp(point1, point2, 0.5)!;
-      Offset insertPoint = Offset.lerp(point1, inBetween, 0.5)!;
-      ballPoints.insert(i, insertPoint);
+  /// Insert interpolated midpoints to raise trajectory resolution without
+  /// smoothing the real arc. Returns a new list; the input is never mutated.
+  static List<Offset> _densify(List<Offset> ballPoints) {
+    final points = <Offset>[];
+    for (int i = 0; i < ballPoints.length; i++) {
+      if (i > 0) {
+        final inBetween = Offset.lerp(ballPoints[i - 1], ballPoints[i], 0.5)!;
+        points.add(Offset.lerp(ballPoints[i - 1], inBetween, 0.5)!);
+      }
+      points.add(ballPoints[i]);
     }
-    if (ballPoints.length < 3) return false;
+    return points;
+  }
+
+  static bool _rimCrossingIsMake(
+    List<Offset> ballPoints,
+    Offset hoopPosition,
+    double hoopRadius,
+  ) {
 
     // Calculate rim height (top of hoop)
     final rimHeight = hoopPosition.dy - (hoopRadius * 0.5);
@@ -165,55 +175,6 @@ class TrajectoryPredictor {
     );
 
     return willMake;
-  }
-
-  /// Calculate shot accuracy percentage based on trajectory
-  static double calculateShotAccuracy({
-    required List<Offset> ballPoints,
-    required Offset hoopPosition,
-  }) {
-    if (ballPoints.isEmpty) return 0.0;
-
-    final predictedPath = predictTrajectory(
-      ballPoints: ballPoints,
-      hoopPosition: hoopPosition,
-    );
-
-    if (predictedPath.isEmpty) return 0.0;
-
-    // Find closest predicted point to hoop
-    double closestDistance = double.infinity;
-    for (final point in predictedPath) {
-      final distance = (point - hoopPosition).distance;
-      if (distance < closestDistance) {
-        closestDistance = distance;
-      }
-    }
-
-    // make sure that the number of points in ballPoints matches predicted trajectory, then use pairwise euclidean distance comprison
-    var Alength = predictedPath.length;
-    var Blength = ballPoints.length;
-
-    // In most cases, the predictedPath will have more points since it's required to be smoother
-    // so we minimize points up to where closest distance to hoop is
-    var x = (Alength / Blength);
-    var newASize = (Alength * x).round();
-
-    var newPredictedPath = predictedPath.sublist(0, newASize);
-    // cut ball points up to where closest distance to hoop is
-    var newBallPoints = ballPoints.sublist(0, newASize);
-
-    // calculate accuracy
-    double accuracy = 0.0;
-    for (int i = 0; i < newASize; i++) {
-      final ballPoint = newBallPoints[i];
-      final predictedPoint = newPredictedPath[i];
-      final distance = (ballPoint - predictedPoint).distance;
-      accuracy += distance;
-    }
-    accuracy /= newASize;
-
-    return accuracy;
   }
 
   /// Calculate shot accuracy as percentage (0-100%)
@@ -453,8 +414,8 @@ class TrajectoryPredictor {
   }) {
     for (final frame in frames) {
       for (final d in frame.detections) {
-        if (d.label.toLowerCase().contains('made')) {
-          final pos = Offset(d.bbox.centerX, d.bbox.centerY);
+        if (d.isMade) {
+          final pos = d.center;
           final dist = (pos - targetHoopPosition).distance;
           if (dist <= proximityThreshold) {
             debugPrint(
@@ -481,35 +442,24 @@ class TrajectoryPredictor {
     FrameData frame, {
     Offset? referencePosition,
   }) {
-    final hoopDetections = frame.detections
-        .where(
-          (d) =>
-              d.label.toLowerCase().contains('hoop') ||
-              d.label.toLowerCase().contains('rim') ||
-              d.label.toLowerCase().contains('basket'),
-        )
-        .toList();
+    final hoopDetections = frame.detections.where((d) => d.isRim).toList();
 
     if (hoopDetections.isEmpty) return null;
     if (referencePosition == null || hoopDetections.length == 1) {
-      final hoop = hoopDetections.first;
-      return Offset(hoop.bbox.centerX, hoop.bbox.centerY);
+      return hoopDetections.first.center;
     }
 
     // Multiple hoops — return the one closest to the reference (target) hoop
     Detection? closest;
     double minDist = double.infinity;
     for (final hoop in hoopDetections) {
-      final pos = Offset(hoop.bbox.centerX, hoop.bbox.centerY);
-      final dist = (pos - referencePosition).distance;
+      final dist = (hoop.center - referencePosition).distance;
       if (dist < minDist) {
         minDist = dist;
         closest = hoop;
       }
     }
-    return closest != null
-        ? Offset(closest.bbox.centerX, closest.bbox.centerY)
-        : null;
+    return closest?.center;
   }
 
   /// Get hoop bounding box from a single frame.
@@ -519,14 +469,7 @@ class TrajectoryPredictor {
     FrameData frame, {
     Offset? referencePosition,
   }) {
-    final hoopDetections = frame.detections
-        .where(
-          (d) =>
-              d.label.toLowerCase().contains('hoop') ||
-              d.label.toLowerCase().contains('rim') ||
-              d.label.toLowerCase().contains('basket'),
-        )
-        .toList();
+    final hoopDetections = frame.detections.where((d) => d.isRim).toList();
 
     if (hoopDetections.isEmpty) return null;
     if (referencePosition == null || hoopDetections.length == 1) {
@@ -537,8 +480,7 @@ class TrajectoryPredictor {
     Detection? closest;
     double minDist = double.infinity;
     for (final hoop in hoopDetections) {
-      final pos = Offset(hoop.bbox.centerX, hoop.bbox.centerY);
-      final dist = (pos - referencePosition).distance;
+      final dist = (hoop.center - referencePosition).distance;
       if (dist < minDist) {
         minDist = dist;
         closest = hoop;

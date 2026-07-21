@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hooplab/pages/camera.dart';
+import 'package:hooplab/pages/session_history.dart';
+import 'package:hooplab/pages/settings.dart';
 import 'package:hooplab/pages/viewer.dart' as viewer;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -22,11 +24,8 @@ class _MethodSelectorState extends State<MethodSelector>
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
 
-  // Constants for consistent styling
-  static const double _buttonHeight = 180.0;
+  // Spacing between the two method buttons.
   static const double _buttonSpacing = 24.0;
-  static const double _borderRadius = 16.0;
-  static const double _iconSize = 48.0;
 
   @override
   void initState() {
@@ -74,7 +73,7 @@ class _MethodSelectorState extends State<MethodSelector>
     try {
       final result = await ImagePicker().pickVideo(source: ImageSource.gallery);
 
-      if (result != null && result.path != null && mounted) {
+      if (result != null && mounted) {
         final videoPath = result.path;
 
         // Navigate to trimmer first
@@ -226,6 +225,29 @@ class _MethodSelectorState extends State<MethodSelector>
         backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
+        foregroundColor: colorScheme.onSurface,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: 'Session History',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const SessionHistoryPage(),
+                ),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsPage()),
+              );
+            },
+          ),
+        ],
       ),
       body: FadeTransition(
         opacity: _fadeAnimation,
@@ -239,7 +261,7 @@ class _MethodSelectorState extends State<MethodSelector>
                   Text(
                     'Select how you want to add your video',
                     style: theme.textTheme.headlineSmall?.copyWith(
-                      color: colorScheme.onSurface.withOpacity(0.8),
+                      color: colorScheme.onSurface.withValues(alpha: 0.8),
                       fontWeight: FontWeight.w500,
                     ),
                     textAlign: TextAlign.center,
@@ -328,7 +350,7 @@ class _MethodSelectorState extends State<MethodSelector>
                     Text(
                       'Please wait...',
                       style: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onSurface.withOpacity(0.6),
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
                     ),
                   ],
@@ -443,25 +465,25 @@ class _MethodButtonState extends State<_MethodButton>
               end: Alignment.bottomRight,
               colors: isEnabled
                   ? [
-                      widget.color.withOpacity(0.1),
-                      widget.color.withOpacity(0.05),
+                      widget.color.withValues(alpha: 0.1),
+                      widget.color.withValues(alpha: 0.05),
                     ]
                   : [
-                      theme.colorScheme.onSurface.withOpacity(0.05),
-                      theme.colorScheme.onSurface.withOpacity(0.02),
+                      theme.colorScheme.onSurface.withValues(alpha: 0.05),
+                      theme.colorScheme.onSurface.withValues(alpha: 0.02),
                     ],
             ),
             borderRadius: BorderRadius.circular(16.0),
             border: Border.all(
               color: isEnabled
-                  ? widget.color.withOpacity(0.3)
-                  : theme.colorScheme.onSurface.withOpacity(0.1),
+                  ? widget.color.withValues(alpha: 0.3)
+                  : theme.colorScheme.onSurface.withValues(alpha: 0.1),
               width: 2,
             ),
             boxShadow: isEnabled
                 ? [
                     BoxShadow(
-                      color: widget.color.withOpacity(0.1),
+                      color: widget.color.withValues(alpha: 0.1),
                       blurRadius: 8,
                       offset: const Offset(0, 4),
                     ),
@@ -476,8 +498,8 @@ class _MethodButtonState extends State<_MethodButton>
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: isEnabled
-                      ? widget.color.withOpacity(0.1)
-                      : theme.colorScheme.onSurface.withOpacity(0.05),
+                      ? widget.color.withValues(alpha: 0.1)
+                      : theme.colorScheme.onSurface.withValues(alpha: 0.05),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
@@ -485,7 +507,7 @@ class _MethodButtonState extends State<_MethodButton>
                   size: 48.0,
                   color: isEnabled
                       ? widget.color
-                      : theme.colorScheme.onSurface.withOpacity(0.3),
+                      : theme.colorScheme.onSurface.withValues(alpha: 0.3),
                 ),
               ),
               const SizedBox(height: 16),
@@ -495,7 +517,7 @@ class _MethodButtonState extends State<_MethodButton>
                   fontWeight: FontWeight.w600,
                   color: isEnabled
                       ? theme.colorScheme.onSurface
-                      : theme.colorScheme.onSurface.withOpacity(0.3),
+                      : theme.colorScheme.onSurface.withValues(alpha: 0.3),
                 ),
               ),
               const SizedBox(height: 4),
@@ -503,8 +525,8 @@ class _MethodButtonState extends State<_MethodButton>
                 widget.subtitle,
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: isEnabled
-                      ? theme.colorScheme.onSurface.withOpacity(0.7)
-                      : theme.colorScheme.onSurface.withOpacity(0.3),
+                      ? theme.colorScheme.onSurface.withValues(alpha: 0.7)
+                      : theme.colorScheme.onSurface.withValues(alpha: 0.3),
                 ),
               ),
             ],
@@ -517,11 +539,10 @@ class _MethodButtonState extends State<_MethodButton>
 
 class VideoTrimmer extends StatefulWidget {
   final String originalVideoPath;
-  const VideoTrimmer({Key? key, required this.originalVideoPath})
-    : super(key: key);
+  const VideoTrimmer({super.key, required this.originalVideoPath});
 
   @override
-  _VideoTrimmerState createState() => _VideoTrimmerState();
+  State<VideoTrimmer> createState() => _VideoTrimmerState();
 }
 
 class _VideoTrimmerState extends State<VideoTrimmer> {
@@ -531,6 +552,7 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
   List<ImageProvider>? _thumbnails;
   bool _isInitializing = true;
   bool _isSeeking = false;
+  bool _disposed = false;
   TrimDurationSpan? _durationSpan;
   TrimDurationSpan? _tempDurationSpan;
 
@@ -544,7 +566,12 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
 
   @override
   void dispose() {
+    _disposed = true;
+    // Remove the listener BEFORE disposing so a teardown-time notification
+    // can't invoke _onVideoPositionChange on a disposed controller.
+    _videoController?.removeListener(_onVideoPositionChange);
     _videoController?.dispose();
+    _videoController = null;
     super.dispose();
   }
 
@@ -553,17 +580,23 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
       // Get video metadata
       final video = EditorVideo.file(widget.originalVideoPath);
       _videoMetadata = await ProVideoEditor.instance.getMetadata(video);
+      if (_disposed) return;
 
       // Initialize video player
-      _videoController = VideoPlayerController.file(
+      final controller = VideoPlayerController.file(
         File(widget.originalVideoPath),
       );
-      await _videoController!.initialize();
-      await _videoController!.setLooping(false);
-      await _videoController!.setVolume(0);
+      _videoController = controller;
+      await controller.initialize();
+      // If the screen was popped during any await above, dispose() has already
+      // torn down _videoController — bail out instead of touching it again.
+      if (_disposed) return;
+      await controller.setLooping(false);
+      await controller.setVolume(0);
 
       // Generate thumbnails
       await _generateThumbnails(video);
+      if (_disposed) return;
 
       // Create ProVideoController
       _proVideoController = ProVideoController(
@@ -574,7 +607,7 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
         thumbnails: _thumbnails,
       );
 
-      _videoController!.addListener(_onVideoPositionChange);
+      controller.addListener(_onVideoPositionChange);
 
       if (mounted) {
         setState(() {
@@ -619,10 +652,13 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
     _thumbnails = thumbnailList.map(MemoryImage.new).toList();
 
     // Precache thumbnails
+    if (!mounted) return;
     await Future.wait(_thumbnails!.map((item) => precacheImage(item, context)));
   }
 
   void _onVideoPositionChange() {
+    // The listener can fire during teardown; never touch a disposed controller.
+    if (_disposed || _videoController == null || _videoMetadata == null) return;
     final duration = _videoController!.value.position;
     _proVideoController?.setPlayTime(duration);
 
@@ -636,6 +672,7 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
   }
 
   Future<void> _seekToPosition(TrimDurationSpan span) async {
+    if (_disposed) return;
     _durationSpan = span;
 
     if (_isSeeking) {
@@ -648,7 +685,17 @@ class _VideoTrimmerState extends State<VideoTrimmer> {
     _proVideoController?.setPlayTime(_durationSpan!.start);
 
     await _videoController?.pause();
+    // Re-check after every await: the screen may have been popped mid-seek,
+    // which disposes and nulls _videoController. This was the crash path.
+    if (_disposed) {
+      _isSeeking = false;
+      return;
+    }
     await _videoController?.seekTo(span.start);
+    if (_disposed) {
+      _isSeeking = false;
+      return;
+    }
 
     _isSeeking = false;
 
